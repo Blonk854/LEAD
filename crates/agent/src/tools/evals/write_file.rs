@@ -203,6 +203,7 @@ impl WriteToolTest {
                 date: chrono::Local::now().format("%Y-%m-%d").to_string(),
                 user_agents_md: None,
                 sandboxing: false,
+                active_goal: None,
             };
             let templates = Templates::new();
             template.render(&templates)?

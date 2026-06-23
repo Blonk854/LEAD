@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Run tool-call smoke evals against every model listed in local-tool-eval-models.txt
+#
+# Prerequisites:
+#   - LM Studio (or Ollama) server running with models loaded
+#   - Models configured in ~/.config/zed/settings.json under language_models
+#   - cargo + cargo-nextest installed
+#
+# Usage:
+#   ./script/run-local-tool-eval-matrix
+#   ./script/run-local-tool-eval-matrix script/local-tool-eval-models.txt
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MODEL_FILE="${1:-$ROOT/script/local-tool-eval-models.txt}"
+
+if [[ ! -f "$MODEL_FILE" ]]; then
+  echo "Model list not found: $MODEL_FILE" >&2
+  exit 1
+fi
+
+mapfile -t MODELS < <(grep -v '^\s*#' "$MODEL_FILE" | grep -v '^\s*$' || true)
+
+if [[ ${#MODELS[@]} -eq 0 ]]; then
+  echo "No models in $MODEL_FILE" >&2
+  exit 1
+fi
+
+echo "Running tool-call smoke evals for ${#MODELS[@]} model(s)"
+echo "Model list: $MODEL_FILE"
+echo
+
+PASSED=0
+FAILED=0
+SKIPPED=0
+RESULTS=()
+
+run_eval() {
+  local model="$1"
+  echo "========================================"
+  echo "Model: $model"
+  echo "========================================"
+
+  if ! ZED_AGENT_MODEL="$model" GPUI_TEST_TIMEOUT=1500 \
+    cargo nextest run -p agent --features unit-eval --no-capture \
+    -E 'test(eval_tool_call_smoke)' 2>&1; then
+    return 1
+  fi
+  return 0
+}
+
+for model in "${MODELS[@]}"; do
+  if [[ "$model" != */* ]]; then
+    echo "Warning: model '$model' missing provider prefix; using lmstudio/$model" >&2
+    model="lmstudio/$model"
+  fi
+  if run_eval "$model"; then
+    PASSED=$((PASSED + 1))
+    RESULTS+=("PASS  $model")
+  else
+    FAILED=$((FAILED + 1))
+    RESULTS+=("FAIL  $model")
+  fi
+  echo
+done
+
+echo "========================================"
+echo "Summary"
+echo "========================================"
+for row in "${RESULTS[@]}"; do
+  echo "$row"
+done
+echo
+echo "Passed: $PASSED  Failed: $FAILED  Total: ${#MODELS[@]}"
+
+if [[ $FAILED -gt 0 ]]; then
+  exit 1
+fi

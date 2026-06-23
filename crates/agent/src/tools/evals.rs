@@ -8,7 +8,11 @@ use std::fmt::Display;
 #[cfg(all(test, feature = "unit-eval"))]
 mod edit_file;
 #[cfg(all(test, feature = "unit-eval"))]
+mod model;
+#[cfg(all(test, feature = "unit-eval"))]
 mod terminal_tool;
+#[cfg(all(test, feature = "unit-eval"))]
+mod tool_call_smoke;
 #[cfg(all(test, feature = "unit-eval"))]
 mod write_file;
 

@@ -158,36 +158,83 @@ pub fn update_environment_fallback_model(cx: &mut App) {
     let registry = LanguageModelRegistry::global(cx);
     let fallback_model = {
         let registry = registry.read(cx);
-        let cloud_provider = registry.provider(&ZED_CLOUD_PROVIDER_ID);
-        if cloud_provider
-            .as_ref()
-            .is_some_and(|provider| provider.is_authenticated(cx))
-        {
-            cloud_provider.and_then(|provider| {
-                let model = provider
-                    .default_model(cx)
-                    .or_else(|| provider.recommended_models(cx).first().cloned())?;
-                Some(ConfiguredModel { provider, model })
-            })
+        if paths::LOCAL_ONLY {
+            local_environment_fallback_model(&registry, cx)
         } else {
-            registry
-                .providers()
-                .iter()
-                .filter(|provider| provider.is_authenticated(cx))
-                .find_map(|provider| {
-                    let model = provider
-                        .default_model(cx)
-                        .or_else(|| provider.recommended_models(cx).first().cloned())?;
-                    Some(ConfiguredModel {
-                        provider: provider.clone(),
-                        model,
-                    })
-                })
+            cloud_environment_fallback_model(&registry, cx)
         }
     };
     registry.update(cx, |registry, cx| {
         registry.set_environment_fallback_model(fallback_model, cx);
     });
+}
+
+fn local_environment_fallback_model(
+    registry: &LanguageModelRegistry,
+    cx: &App,
+) -> Option<ConfiguredModel> {
+    for provider_name in ["lmstudio", "ollama"] {
+        let provider_id = LanguageModelProviderId::new(provider_name);
+        let Some(provider) = registry.provider(&provider_id) else {
+            continue;
+        };
+        if !provider.is_authenticated(cx) {
+            continue;
+        }
+        let model = provider
+            .default_model(cx)
+            .or_else(|| provider.recommended_models(cx).first().cloned())?;
+        return Some(ConfiguredModel {
+            provider: provider.clone(),
+            model,
+        });
+    }
+
+    registry
+        .providers()
+        .iter()
+        .filter(|provider| provider.is_authenticated(cx))
+        .find_map(|provider| {
+            let model = provider
+                .default_model(cx)
+                .or_else(|| provider.recommended_models(cx).first().cloned())?;
+            Some(ConfiguredModel {
+                provider: provider.clone(),
+                model,
+            })
+        })
+}
+
+fn cloud_environment_fallback_model(
+    registry: &LanguageModelRegistry,
+    cx: &App,
+) -> Option<ConfiguredModel> {
+    let cloud_provider = registry.provider(&ZED_CLOUD_PROVIDER_ID);
+    if cloud_provider
+        .as_ref()
+        .is_some_and(|provider| provider.is_authenticated(cx))
+    {
+        cloud_provider.and_then(|provider| {
+            let model = provider
+                .default_model(cx)
+                .or_else(|| provider.recommended_models(cx).first().cloned())?;
+            Some(ConfiguredModel { provider, model })
+        })
+    } else {
+        registry
+            .providers()
+            .iter()
+            .filter(|provider| provider.is_authenticated(cx))
+            .find_map(|provider| {
+                let model = provider
+                    .default_model(cx)
+                    .or_else(|| provider.recommended_models(cx).first().cloned())?;
+                Some(ConfiguredModel {
+                    provider: provider.clone(),
+                    model,
+                })
+            })
+    }
 }
 
 fn register_openai_compatible_providers(
@@ -226,6 +273,50 @@ fn register_language_model_providers(
     credentials_provider: Arc<dyn CredentialsProvider>,
     cx: &mut Context<LanguageModelRegistry>,
 ) {
+    register_local_language_model_providers(registry, client.clone(), credentials_provider.clone(), cx);
+
+    if !paths::LOCAL_ONLY {
+        register_cloud_language_model_providers(
+            registry,
+            user_store,
+            client,
+            credentials_provider,
+            cx,
+        );
+    }
+}
+
+fn register_local_language_model_providers(
+    registry: &mut LanguageModelRegistry,
+    client: Arc<Client>,
+    credentials_provider: Arc<dyn CredentialsProvider>,
+    cx: &mut Context<LanguageModelRegistry>,
+) {
+    registry.register_provider(
+        Arc::new(LmStudioLanguageModelProvider::new(
+            client.http_client(),
+            credentials_provider.clone(),
+            cx,
+        )),
+        cx,
+    );
+    registry.register_provider(
+        Arc::new(OllamaLanguageModelProvider::new(
+            client.http_client(),
+            credentials_provider,
+            cx,
+        )),
+        cx,
+    );
+}
+
+fn register_cloud_language_model_providers(
+    registry: &mut LanguageModelRegistry,
+    user_store: Entity<UserStore>,
+    client: Arc<Client>,
+    credentials_provider: Arc<dyn CredentialsProvider>,
+    cx: &mut Context<LanguageModelRegistry>,
+) {
     registry.register_provider(
         Arc::new(CloudLanguageModelProvider::new(
             user_store,
@@ -244,22 +335,6 @@ fn register_language_model_providers(
     );
     registry.register_provider(
         Arc::new(OpenAiLanguageModelProvider::new(
-            client.http_client(),
-            credentials_provider.clone(),
-            cx,
-        )),
-        cx,
-    );
-    registry.register_provider(
-        Arc::new(OllamaLanguageModelProvider::new(
-            client.http_client(),
-            credentials_provider.clone(),
-            cx,
-        )),
-        cx,
-    );
-    registry.register_provider(
-        Arc::new(LmStudioLanguageModelProvider::new(
             client.http_client(),
             credentials_provider.clone(),
             cx,

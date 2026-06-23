@@ -1,0 +1,10 @@
+Summarize progress toward the active goal in 5–8 bullet points for a future continuation of this work.
+
+Include:
+- Completed work since the last checkpoint (if any)
+- Files or paths touched
+- Current state of the codebase or task
+- Blockers or open questions
+- Concrete next steps
+
+Be concise (under 400 words). Write only the summary, no preamble.

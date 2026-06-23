@@ -1,0 +1,12 @@
+You are writing a hand-off so a fresh agent thread can continue this work seamlessly with no prior context. The new thread will start with an empty context window and only your summary, so it must be self-contained.
+
+Write a thorough, well-structured hand-off that includes:
+- Objective: what the user is ultimately trying to achieve (and the goal's success criteria, if a goal is active)
+- Decisions: the key decisions and approach taken, and why
+- Completed: concrete work already done, including files/paths created or modified
+- Current state: the exact state of the code or task right now
+- Next steps: the specific, ordered steps that remain to finish the work
+- Key references: constraints, preferences, commands, IDs, URLs, and data needed to continue
+- Pitfalls: anything tried that did not work, so it is not repeated
+
+Be specific and cite exact file paths, function names, and commands wherever possible. Do not ask the user questions. Write only the hand-off, with no preamble.

@@ -5,6 +5,8 @@ use rust_embed::RustEmbed;
 use serde::Serialize;
 use std::sync::Arc;
 
+use crate::ThreadGoal;
+
 #[derive(RustEmbed)]
 #[folder = "src/templates"]
 #[include = "*.hbs"]
@@ -49,6 +51,8 @@ pub struct SystemPromptTemplate<'a> {
     /// per-command flags the model can request to relax them. When
     /// `false`, the prompt omits the sandbox section entirely.
     pub sandboxing: bool,
+    /// Active persisted goal for Codex-style `/goal` mode.
+    pub active_goal: Option<&'a ThreadGoal>,
 }
 
 impl Template for SystemPromptTemplate<'_> {
@@ -94,6 +98,7 @@ mod tests {
             date: "2026-01-01".to_string(),
             user_agents_md: None,
             sandboxing: false,
+            active_goal: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -127,6 +132,7 @@ mod tests {
             date: "2026-01-01".to_string(),
             user_agents_md: Some("always be concise".into()),
             sandboxing: false,
+            active_goal: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -154,6 +160,7 @@ mod tests {
             date: "2026-01-01".to_string(),
             user_agents_md: None,
             sandboxing: false,
+            active_goal: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -185,6 +192,7 @@ mod tests {
             date: "2026-01-01".to_string(),
             user_agents_md: None,
             sandboxing: true,
+            active_goal: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -209,6 +217,7 @@ mod tests {
             date: "2026-01-01".to_string(),
             user_agents_md: None,
             sandboxing: true,
+            active_goal: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -227,6 +236,7 @@ mod tests {
             date: "2026-01-01".to_string(),
             user_agents_md: None,
             sandboxing: false,
+            active_goal: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -243,6 +253,7 @@ mod tests {
             date: "2026-01-01".to_string(),
             user_agents_md: None,
             sandboxing: false,
+            active_goal: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();

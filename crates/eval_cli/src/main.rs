@@ -10,6 +10,9 @@
 //! ```text
 //! eval-cli --workdir /testbed --model anthropic/claude-sonnet-4-6-latest \
 //!          --instruction "Fix the bug described in..." --timeout 600
+//!
+//! eval-cli --workdir . --model lmstudio/qwen/qwen3-14b --goal \
+//!          --instruction "List files in the repo root" --timeout 300
 //! ```
 //!
 //! ## Output
@@ -100,6 +103,14 @@ struct Args {
     /// Enable or disable extended thinking. Defaults to model auto-detection if omitted.
     #[arg(long)]
     thinking: Option<bool>,
+
+    /// Wrap the instruction in `/goal` mode for auto-continuation until done.
+    #[arg(long)]
+    goal: bool,
+
+    /// Token budget for `--goal` (passed as `/goal --budget N`).
+    #[arg(long)]
+    goal_budget: Option<u64>,
 }
 
 enum AgentOutcome {
@@ -125,6 +136,12 @@ struct EvalResult {
     cache_creation_input_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_read_input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    goal_objective: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    goal_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    goal_continuations: Option<u32>,
 }
 
 const EXIT_OK: i32 = 0;
@@ -155,6 +172,7 @@ fn main() {
         eprintln!("Error reading instruction: {e}");
         process::exit(EXIT_ERROR);
     });
+    let instruction = wrap_instruction_for_goal(&args, instruction);
 
     let workdir = args.workdir.canonicalize().unwrap_or_else(|e| {
         eprintln!("Invalid --workdir {:?}: {e}", args.workdir);
@@ -192,7 +210,7 @@ fn main() {
 
             let start = Instant::now();
 
-            let (outcome, token_usage) = run_agent(
+            let (outcome, token_usage, goal_summary) = run_agent(
                 &app_state,
                 &workdir,
                 &instruction,
@@ -239,6 +257,9 @@ fn main() {
                     .as_ref()
                     .filter(|u| u.cache_read_input_tokens > 0)
                     .map(|u| u.cache_read_input_tokens),
+                goal_objective: goal_summary.as_ref().map(|g| g.objective.clone()),
+                goal_status: goal_summary.as_ref().map(|g| g.status.clone()),
+                goal_continuations: goal_summary.map(|g| g.continuation_count),
             };
 
             match serde_json::to_string_pretty(&result) {
@@ -271,6 +292,28 @@ fn read_instruction(args: &Args) -> Result<String> {
     };
     anyhow::ensure!(!text.trim().is_empty(), "instruction is empty");
     Ok(text)
+}
+
+fn wrap_instruction_for_goal(args: &Args, instruction: String) -> String {
+    if !args.goal {
+        return instruction;
+    }
+
+    let trimmed = instruction.trim();
+    if trimmed.starts_with("/goal") {
+        return instruction;
+    }
+
+    match args.goal_budget {
+        Some(budget) => format!("/goal --budget {budget} {trimmed}"),
+        None => format!("/goal {trimmed}"),
+    }
+}
+
+struct GoalSummary {
+    objective: String,
+    status: String,
+    continuation_count: u32,
 }
 
 async fn wait_for_model(selected: &SelectedModel, cx: &mut AsyncApp) -> Result<()> {
@@ -459,14 +502,18 @@ async fn run_agent(
     reasoning_effort: Option<&str>,
     output_dir: Option<&std::path::Path>,
     cx: &mut AsyncApp,
-) -> (Result<AgentOutcome>, Option<language_model::TokenUsage>) {
+) -> (
+    Result<AgentOutcome>,
+    Option<language_model::TokenUsage>,
+    Option<GoalSummary>,
+) {
     let selected = match SelectedModel::from_str(model_name).map_err(|e| anyhow::anyhow!("{e}")) {
         Ok(selected) => selected,
-        Err(e) => return (Err(e), None),
+        Err(e) => return (Err(e), None, None),
     };
 
     if let Err(e) = wait_for_model(&selected, cx).await {
-        return (Err(e), None);
+        return (Err(e), None, None);
     }
 
     let setup_result: Result<()> = cx.update(|cx| {
@@ -523,7 +570,7 @@ async fn run_agent(
     });
 
     if let Err(e) = setup_result {
-        return (Err(e), None);
+        return (Err(e), None, None);
     }
 
     let project = cx.update(|cx| {
@@ -545,7 +592,7 @@ async fn run_agent(
     let worktree = project.update(cx, |project, cx| project.create_worktree(workdir, true, cx));
     let worktree = match worktree.await {
         Ok(w) => w,
-        Err(e) => return (Err(e).context("creating worktree"), None),
+        Err(e) => return (Err(e).context("creating worktree"), None, None),
     };
 
     let scan_result = worktree.update(cx, |tree, _cx| {
@@ -555,7 +602,7 @@ async fn run_agent(
     });
     match scan_result {
         Ok(future) => future.await,
-        Err(e) => return (Err(e), None),
+        Err(e) => return (Err(e), None, None),
     };
 
     let agent = cx.update(|cx| {
@@ -573,7 +620,7 @@ async fn run_agent(
         .await
     {
         Ok(t) => t,
-        Err(e) => return (Err(e).context("creating ACP session"), None),
+        Err(e) => return (Err(e).context("creating ACP session"), None, None),
     };
 
     let _subscription = cx.subscribe(&acp_thread, |acp_thread, event, cx| {
@@ -638,19 +685,6 @@ async fn run_agent(
         connection.thread(&session_id, cx)
     });
 
-    let cumulative_usage = if let Some(thread) = &thread {
-        let db_thread = thread.read_with(cx, |thread, cx| thread.to_db(cx));
-        let db_thread = db_thread.await;
-        let usage = db_thread.cumulative_token_usage;
-        if usage.input_tokens > 0 || usage.output_tokens > 0 {
-            Some(usage)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
     let acp_usage = cx.update(|cx| {
         acp_thread
             .read(cx)
@@ -662,27 +696,47 @@ async fn run_agent(
             })
     });
 
-    let final_usage = cumulative_usage.or(acp_usage);
-
-    if let (Some(thread), Some(dir)) = (&thread, output_dir) {
-        let markdown = thread.read_with(cx, |thread, _cx| thread.to_markdown());
-        if let Err(e) = std::fs::write(dir.join("thread.md"), markdown) {
-            eprintln!("Error writing thread.md: {e:#}");
-        }
-
+    let (final_usage, goal_summary) = if let Some(thread) = &thread {
         let db_thread = thread.read_with(cx, |thread, cx| thread.to_db(cx));
         let db_thread = db_thread.await;
-        match serde_json::to_string_pretty(&db_thread) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(dir.join("thread.json"), json) {
-                    eprintln!("Error writing thread.json: {e:#}");
-                }
-            }
-            Err(e) => eprintln!("Error serializing thread.json: {e:#}"),
-        }
-    }
 
-    (outcome, final_usage)
+        let cumulative_usage = {
+            let usage = db_thread.cumulative_token_usage;
+            if usage.input_tokens > 0 || usage.output_tokens > 0 {
+                Some(usage)
+            } else {
+                None
+            }
+        };
+
+        let goal_summary = db_thread.goal.as_ref().map(|goal| GoalSummary {
+            objective: goal.objective.clone(),
+            status: format!("{:?}", goal.status).to_lowercase(),
+            continuation_count: goal.continuation_count,
+        });
+
+        if let Some(dir) = output_dir {
+            let markdown = thread.read_with(cx, |thread, _cx| thread.to_markdown());
+            if let Err(e) = std::fs::write(dir.join("thread.md"), markdown) {
+                eprintln!("Error writing thread.md: {e:#}");
+            }
+
+            match serde_json::to_string_pretty(&db_thread) {
+                Ok(json) => {
+                    if let Err(e) = std::fs::write(dir.join("thread.json"), json) {
+                        eprintln!("Error writing thread.json: {e:#}");
+                    }
+                }
+                Err(e) => eprintln!("Error serializing thread.json: {e:#}"),
+            }
+        }
+
+        (cumulative_usage.or(acp_usage), goal_summary)
+    } else {
+        (acp_usage, None)
+    };
+
+    (outcome, final_usage, goal_summary)
 }
 
 fn log_acp_thread_event(

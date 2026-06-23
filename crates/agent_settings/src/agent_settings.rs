@@ -13,10 +13,11 @@ use project::DisableAiSettings;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::{
-    DockPosition, DockSide, LanguageModelParameters, LanguageModelSelection,
-    NotifyWhenAgentWaiting, PlaySoundWhenAgentDone, RegisterSetting, Settings, SettingsContent,
-    SettingsStore, SidebarDockPosition, SidebarSide, ThinkingBlockDisplay, ToolPermissionMode,
-    update_settings_file, update_settings_file_with_completion,
+    DockPosition, DockSide, LanguageModelParameters, LanguageModelProviderSetting,
+    LanguageModelSelection, NotifyWhenAgentWaiting, PlaySoundWhenAgentDone, RegisterSetting,
+    Settings, SettingsContent, SettingsStore, SidebarDockPosition, SidebarSide,
+    ThinkingBlockDisplay, ToolPermissionMode, update_settings_file,
+    update_settings_file_with_completion,
 };
 
 pub use crate::agent_profile::*;
@@ -26,6 +27,8 @@ pub const SUMMARIZE_THREAD_PROMPT: &str = include_str!("prompts/summarize_thread
 pub const SUMMARIZE_THREAD_DETAILED_PROMPT: &str =
     include_str!("prompts/summarize_thread_detailed_prompt.txt");
 pub const COMPACTION_PROMPT: &str = include_str!("prompts/compaction_prompt.txt");
+pub const GOAL_CHECKPOINT_PROMPT: &str = include_str!("prompts/goal_checkpoint_prompt.txt");
+pub const HANDOFF_PROMPT: &str = include_str!("prompts/handoff_prompt.txt");
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PanelLayout {
@@ -172,6 +175,39 @@ pub struct AgentSettings {
     pub show_merge_conflict_indicator: bool,
     pub tool_permissions: ToolPermissions,
     pub sandbox_permissions: SandboxPermissions,
+    pub network_agent: NetworkAgentSettings,
+    pub auto_thread_rollover: AutoThreadRollover,
+}
+
+/// Resolved configuration for automatic thread rollover and hand-off.
+///
+/// When [`enabled`](Self::enabled) and the active thread's context exceeds
+/// [`context_fraction`](Self::context_fraction) of the model's window, LEAD
+/// rolls the conversation into a fresh thread seeded with a hand-off summary.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AutoThreadRollover {
+    pub enabled: bool,
+    pub context_fraction: f32,
+}
+
+impl Default for AutoThreadRollover {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            context_fraction: 0.75,
+        }
+    }
+}
+
+/// Resolved configuration for the optional "Network Agent" mode.
+///
+/// When [`enabled`](Self::enabled) and a [`model`](Self::model) is configured,
+/// a model served from a network endpoint drives the main agent while the
+/// local `default_model` handles delegated subagent work.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NetworkAgentSettings {
+    pub enabled: bool,
+    pub model: Option<String>,
 }
 
 impl AgentSettings {
@@ -213,6 +249,46 @@ impl AgentSettings {
             .iter()
             .map(|sel| SharedString::from(format!("{}/{}", sel.provider.0, sel.model)))
             .collect()
+    }
+
+    /// The provider id used for the Network Agent's OpenAI-compatible endpoint.
+    pub const NETWORK_AGENT_PROVIDER_ID: &'static str = "network-agent";
+
+    /// True when the Network Agent toggle is on and a network model is configured.
+    pub fn network_agent_active(&self) -> bool {
+        self.network_agent.enabled && self.network_agent.model.is_some()
+    }
+
+    /// The model selection that should drive the main agent, accounting for the
+    /// Network Agent toggle. When active, this is the network-served model.
+    pub fn effective_default_model(&self) -> Option<LanguageModelSelection> {
+        if let Some(model) = self
+            .network_agent
+            .model
+            .clone()
+            .filter(|_| self.network_agent.enabled)
+        {
+            Some(LanguageModelSelection {
+                provider: LanguageModelProviderSetting(Self::NETWORK_AGENT_PROVIDER_ID.into()),
+                model,
+                enable_thinking: false,
+                effort: None,
+                speed: None,
+            })
+        } else {
+            self.default_model.clone()
+        }
+    }
+
+    /// The model selection subagents should use. When the Network Agent is
+    /// active, subagents run on the local `default_model` (the heavy lifting),
+    /// otherwise the configured `subagent_model` is used.
+    pub fn effective_subagent_model(&self) -> Option<LanguageModelSelection> {
+        if self.network_agent_active() {
+            self.default_model.clone()
+        } else {
+            self.subagent_model.clone()
+        }
     }
 }
 
@@ -693,6 +769,26 @@ impl Settings for AgentSettings {
             show_merge_conflict_indicator: agent.show_merge_conflict_indicator.unwrap(),
             tool_permissions: compile_tool_permissions(agent.tool_permissions),
             sandbox_permissions: compile_sandbox_permissions(agent.sandbox_permissions),
+            network_agent: agent
+                .network_agent
+                .map(|content| NetworkAgentSettings {
+                    enabled: content.enabled.unwrap_or(false),
+                    model: content.model.filter(|model| !model.is_empty()),
+                })
+                .unwrap_or_default(),
+            auto_thread_rollover: agent
+                .auto_thread_rollover
+                .map(|content| {
+                    let defaults = AutoThreadRollover::default();
+                    AutoThreadRollover {
+                        enabled: content.enabled.unwrap_or(defaults.enabled),
+                        context_fraction: content
+                            .context_fraction
+                            .map(|fraction| fraction.clamp(0.1, 0.95))
+                            .unwrap_or(defaults.context_fraction),
+                    }
+                })
+                .unwrap_or_default(),
         }
     }
 }
@@ -1341,6 +1437,33 @@ mod tests {
         let content: ToolPermissionsContent = serde_json::from_value(json_deny).unwrap();
         let permissions = compile_tool_permissions(Some(content));
         assert_eq!(permissions.default, ToolPermissionMode::Deny);
+    }
+
+    #[gpui::test]
+    fn test_auto_thread_rollover_defaults_and_overrides(cx: &mut gpui::App) {
+        let store = SettingsStore::test(cx);
+        cx.set_global(store);
+        project::DisableAiSettings::register(cx);
+        AgentSettings::register(cx);
+
+        // Defaults: enabled with a 0.75 context fraction.
+        let defaults = &AgentSettings::get_global(cx).auto_thread_rollover;
+        assert!(defaults.enabled);
+        assert_eq!(defaults.context_fraction, 0.75);
+
+        // User overrides are applied, and out-of-range fractions are clamped.
+        SettingsStore::update_global(cx, |store, cx| {
+            store
+                .set_user_settings(
+                    r#"{ "agent": { "auto_thread_rollover": { "enabled": false, "context_fraction": 5.0 } } }"#,
+                    cx,
+                )
+                .unwrap();
+        });
+
+        let overridden = &AgentSettings::get_global(cx).auto_thread_rollover;
+        assert!(!overridden.enabled);
+        assert_eq!(overridden.context_fraction, 0.95);
     }
 
     #[gpui::test]

@@ -21,14 +21,13 @@ use anyhow::{Context as _, Result};
 use clap::Parser;
 use cli::FORCE_CLI_MODE_ENV_VAR_NAME;
 use client::{Client, ProxySettings, RefreshLlmTokenListener, UserStore, parse_zed_link};
-use collab_ui::channel_view::ChannelView;
 use collections::HashMap;
 use crashes::InitCrashHandler;
 use db::kvp::{GlobalKeyValueStore, KeyValueStore};
 use editor::Editor;
 use extension::ExtensionHostProxy;
 use fs::{Fs, RealFs};
-use futures::{StreamExt, channel::oneshot, future};
+use futures::{StreamExt, channel::oneshot};
 use git::GitHostingProviderRegistry;
 use git_ui::clone::clone_and_open;
 use gpui::{
@@ -67,7 +66,7 @@ use std::{
 };
 use theme::{ActiveTheme, GlobalTheme, ThemeRegistry};
 use theme_settings::load_user_theme;
-use util::{ResultExt, TryFutureExt, maybe};
+use util::{ResultExt, maybe};
 use uuid::Uuid;
 use workspace::{
     AppState, MultiWorkspace, SerializedWorkspaceLocation, SessionWorkspace, Toast,
@@ -396,7 +395,7 @@ fn main() {
                         app_version.patch,
                     )
                     .to_string(),
-                    binary: "zed".to_string(),
+                    binary: paths::APP_NAME_LOWERCASE.to_string(),
                     release_channel: release_channel::RELEASE_CHANNEL_NAME.clone(),
                     commit_sha: app_commit_sha
                         .as_ref()
@@ -498,7 +497,8 @@ fn main() {
         handle_keymap_file_changes(user_keymap_file_rx, user_keymap_watcher, cx);
 
         let user_agent = format!(
-            "Zed/{} ({}; {})",
+            "{}/{} ({}; {})",
+            paths::APP_NAME,
             AppVersion::global(cx),
             std::env::consts::OS,
             std::env::consts::ARCH
@@ -652,9 +652,11 @@ fn main() {
         });
         AppState::set_global(app_state.clone(), cx);
 
-        auto_update::init(client.clone(), cx);
+        if !paths::LOCAL_ONLY {
+            auto_update::init(client.clone(), cx);
+            auto_update_ui::init(cx);
+        }
         dap_adapters::init(cx);
-        auto_update_ui::init(cx);
         reliability::init(client.clone(), cx);
         extension_host::init(
             extension_host_proxy.clone(),
@@ -672,36 +674,42 @@ fn main() {
             cx.background_executor().clone(),
         );
         command_palette::init(cx);
-        let copilot_chat_configuration = copilot_chat::CopilotChatConfiguration {
-            enterprise_uri: language::language_settings::all_language_settings(None, cx)
-                .edit_predictions
-                .copilot
-                .enterprise_uri
-                .clone(),
-        };
-        copilot_chat::init(
-            app_state.fs.clone(),
-            app_state.client.http_client(),
-            copilot_chat_configuration,
-            cx,
-        );
+        if !paths::LOCAL_ONLY {
+            let copilot_chat_configuration = copilot_chat::CopilotChatConfiguration {
+                enterprise_uri: language::language_settings::all_language_settings(None, cx)
+                    .edit_predictions
+                    .copilot
+                    .enterprise_uri
+                    .clone(),
+            };
+            copilot_chat::init(
+                app_state.fs.clone(),
+                app_state.client.http_client(),
+                copilot_chat_configuration,
+                cx,
+            );
 
-        copilot_ui::init(&app_state, cx);
+            copilot_ui::init(&app_state, cx);
+        }
         language_model::init(cx);
-        RefreshLlmTokenListener::register(
-            app_state.client.clone(),
-            app_state.user_store.clone(),
-            cx,
-        );
+        if !paths::LOCAL_ONLY {
+            RefreshLlmTokenListener::register(
+                app_state.client.clone(),
+                app_state.user_store.clone(),
+                cx,
+            );
+        }
         language_models::init(app_state.user_store.clone(), app_state.client.clone(), cx);
         acp_tools::init(cx);
         zed::telemetry_log::init(cx);
         zed::remote_debug::init(cx);
-        edit_prediction_ui::init(cx);
-        web_search::init(cx);
-        web_search_providers::init(app_state.client.clone(), app_state.user_store.clone(), cx);
+        if !paths::LOCAL_ONLY {
+            edit_prediction_ui::init(cx);
+            web_search::init(cx);
+            web_search_providers::init(app_state.client.clone(), app_state.user_store.clone(), cx);
+            edit_prediction_registry::init(app_state.client.clone(), app_state.user_store.clone(), cx);
+        }
         snippet_provider::init(cx);
-        edit_prediction_registry::init(app_state.client.clone(), app_state.user_store.clone(), cx);
         let prompt_builder = PromptBuilder::load(app_state.fs.clone(), stdout_is_a_pty(), cx);
         project::AgentRegistryStore::init_global(
             cx,
@@ -718,6 +726,9 @@ fn main() {
         );
         zed::watch_user_agents_md(app_state.fs.clone(), cx);
 
+        // REPL store/actions are referenced by always-on UI (quick action bar)
+        // and workspace actions, so initialize the backend even in LOCAL_ONLY.
+        // The REPL UI is hidden via the `jupyter.enabled` default instead.
         repl::init(app_state.fs.clone(), cx);
         recent_projects::init(cx);
         dev_container::init(cx);
@@ -742,6 +753,7 @@ fn main() {
         outline_panel::init(cx);
         tasks_ui::init(cx);
         snippets_ui::init(cx);
+        // Collab backends (not UI): required by notifications and the title bar.
         channel::init(&app_state.client.clone(), app_state.user_store.clone(), cx);
         search::init(cx);
         cx.set_global(workspace::PaneSearchBarCallbacks {
@@ -753,7 +765,9 @@ fn main() {
             },
             wrap_div_with_search_actions: search::buffer_search::register_pane_search_actions,
         });
-        vim::init(cx);
+        if !paths::LOCAL_ONLY {
+            vim::init(cx);
+        }
         terminal_view::init(cx);
         journal::init(app_state.clone(), cx);
         encoding_selector::init(cx);
@@ -765,7 +779,9 @@ fn main() {
         language_tools::init(cx);
         call::init(app_state.client.clone(), app_state.user_store.clone(), cx);
         notifications::init(app_state.client.clone(), app_state.user_store.clone(), cx);
-        collab_ui::init(&app_state, cx);
+        // Provides the window title bar (incl. window controls and drag region).
+        // Previously wired up via `collab_ui::init`, which we skip in LOCAL_ONLY.
+        title_bar::init(cx);
         git_ui::init(cx);
         feedback::init(cx);
         markdown_preview::init(cx);
@@ -775,7 +791,9 @@ fn main() {
         settings_ui::init(cx);
         keymap_editor::init(cx);
         extensions_ui::init(cx);
-        edit_prediction::init(cx);
+        if !paths::LOCAL_ONLY {
+            edit_prediction::init(cx);
+        }
         inspector_ui::init(app_state.clone(), cx);
         json_schema_store::init(cx);
         miniprofiler_ui::init(*STARTUP_TIME.get().unwrap(), cx);
@@ -1406,25 +1424,12 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                     .await?;
                 }
 
-                let workspace_window =
-                    workspace::get_any_active_multi_workspace(app_state, cx.clone()).await?;
-
-                let workspace = workspace_window.read_with(cx, |mw, _| mw.workspace().clone())?;
-
-                let mut promises = Vec::new();
                 for (channel_id, heading) in request.open_channel_notes {
-                    promises.push(cx.update_window(workspace_window.into(), |_, window, cx| {
-                        ChannelView::open(
-                            client::ChannelId(channel_id),
-                            heading,
-                            workspace.clone(),
-                            window,
-                            cx,
-                        )
-                        .log_err()
-                    })?)
+                    log::debug!(
+                        "Ignoring open_channel_notes for channel {channel_id} \
+                         (heading: {heading:?}); collab notes UI not in this build"
+                    );
                 }
-                future::join_all(promises).await;
                 anyhow::Ok(())
             })
             .await;
@@ -1763,7 +1768,7 @@ fn stdout_is_a_pty() -> bool {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "zed", disable_version_flag = true, max_term_width = 100)]
+#[command(name = "lead", disable_version_flag = true, max_term_width = 100)]
 struct Args {
     /// A sequence of space-separated paths or urls that you want to open.
     ///

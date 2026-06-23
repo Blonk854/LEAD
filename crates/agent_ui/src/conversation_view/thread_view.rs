@@ -1,9 +1,12 @@
 use crate::{
-    DEFAULT_THREAD_TITLE, SelectPermissionGranularity,
+    DEFAULT_THREAD_TITLE, PromptInputMode, SelectPermissionGranularity,
     agent_configuration::configure_context_server_modal::default_markdown_style,
+    goal_mode_selector::apply_goal_mode_to_contents,
+    network_agent::{NetworkAgentModal, set_network_agent_enabled},
     open_abs_path_at_point,
     thread_metadata_store::{ThreadId, ThreadMetadataStore},
 };
+use agent::{GoalCommand, GoalStatus};
 use agent_client_protocol::schema as acp;
 use std::cell::RefCell;
 
@@ -24,7 +27,7 @@ use gpui::TaskExt;
 use heapless::Vec as ArrayVec;
 use language_model::{
     FastModeConfirmation, LanguageModelEffortLevel, LanguageModelId, LanguageModelProviderId,
-    LanguageModelRegistry, Speed,
+    LanguageModelRegistry, SelectedModel, Speed,
 };
 use settings::update_settings_file;
 use ui::{ButtonLike, SpinnerLabel, SpinnerVariant, SplitButton, SplitButtonStyle, Tab};
@@ -609,6 +612,9 @@ pub struct ThreadView {
     pub add_context_menu_handle: PopoverMenuHandle<ContextMenu>,
     pub thinking_effort_menu_handle: PopoverMenuHandle<ContextMenu>,
     pub fast_mode_menu_handle: PopoverMenuHandle<ContextMenu>,
+    pub goal_mode_menu_handle: PopoverMenuHandle<ContextMenu>,
+    pub network_agent_menu_handle: PopoverMenuHandle<ContextMenu>,
+    pub prompt_input_mode: PromptInputMode,
     pub project: WeakEntity<Project>,
     /// Cache + worktree snapshot for resolving paths in markdown code spans.
     /// Cloned from the parent `ConversationView` so the cache is shared and the
@@ -884,6 +890,21 @@ impl ThreadView {
             ));
         }
 
+        let initial_prompt_input_mode = thread
+            .read(cx)
+            .connection()
+            .clone()
+            .downcast::<agent::NativeAgentConnection>()
+            .and_then(|connection| connection.thread(&session_id, cx))
+            .and_then(|native_thread| {
+                native_thread
+                    .read(cx)
+                    .goal()
+                    .filter(|goal| goal.is_active())
+                    .map(|_| PromptInputMode::Goal)
+            })
+            .unwrap_or_default();
+
         subscriptions.push(cx.observe(&message_editor, |this, editor, cx| {
             let is_empty = editor.read(cx).text(cx).is_empty();
             let draft_contents_task = if is_empty {
@@ -972,6 +993,9 @@ impl ThreadView {
             add_context_menu_handle: PopoverMenuHandle::default(),
             thinking_effort_menu_handle: PopoverMenuHandle::default(),
             fast_mode_menu_handle: PopoverMenuHandle::default(),
+            goal_mode_menu_handle: PopoverMenuHandle::default(),
+            network_agent_menu_handle: PopoverMenuHandle::default(),
+            prompt_input_mode: initial_prompt_input_mode,
             project,
             code_span_resolver,
             show_external_source_prompt_warning,
@@ -981,6 +1005,11 @@ impl ThreadView {
             skill_loading_errors: Vec::new(),
             dismissed_skill_loading_errors: HashSet::default(),
         };
+
+        if let Some(native_thread) = this.as_native_thread(cx) {
+            this._subscriptions
+                .push(cx.observe(&native_thread, |_this, _, cx| cx.notify()));
+        }
 
         this.sync_generating_indicator(cx);
         this.sync_editor_mode_for_empty_state(cx);
@@ -1453,8 +1482,13 @@ impl ThreadView {
                 .ok();
         }
 
+        let goal_mode = self.prompt_input_mode == PromptInputMode::Goal;
         let contents_task = cx.spawn_in(window, async move |_this, cx| {
-            let (contents, tracked_buffers) = contents.await?;
+            let (mut contents, tracked_buffers) = contents.await?;
+
+            if goal_mode {
+                contents = apply_goal_mode_to_contents(contents);
+            }
 
             if contents.is_empty() {
                 return Ok(None);
@@ -1600,14 +1634,14 @@ impl ThreadView {
             res.map(|_| ())
         });
 
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             if let Err(err) = task.await {
                 this.update(cx, |this, cx| {
                     this.handle_thread_error(err, cx);
                 })
                 .ok();
             } else {
-                this.update(cx, |this, cx| {
+                this.update_in(cx, |this, window, cx| {
                     let should_be_following = this
                         .workspace
                         .update(cx, |workspace, _| {
@@ -1615,11 +1649,55 @@ impl ThreadView {
                         })
                         .unwrap_or_default();
                     this.should_be_following = should_be_following;
+                    this.maybe_auto_rollover(window, cx);
                 })
                 .ok();
             }
         })
         .detach();
+    }
+
+    /// After a turn completes, if the thread's context has filled past the
+    /// configured threshold, automatically roll the conversation into a fresh
+    /// thread (carrying any active goal) so the model keeps performing well.
+    fn maybe_auto_rollover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rollover = &AgentSettings::get_global(cx).auto_thread_rollover;
+        if !rollover.enabled {
+            return;
+        }
+        let context_fraction = rollover.context_fraction;
+
+        // Only roll over the root thread, when idle with nothing queued.
+        if self.parent_session_id.is_some() {
+            return;
+        }
+        if self.thread.read(cx).status() != ThreadStatus::Idle {
+            return;
+        }
+        if !self.local_queued_messages.is_empty() {
+            return;
+        }
+
+        let Some(native_thread) = self.as_native_thread(cx) else {
+            return;
+        };
+        if !native_thread
+            .read(cx)
+            .should_roll_over(context_fraction)
+        {
+            return;
+        }
+
+        let Some(panel) = self
+            .workspace
+            .upgrade()
+            .and_then(|workspace| workspace.read(cx).panel::<AgentPanel>(cx))
+        else {
+            return;
+        };
+        panel.update(cx, |panel, cx| {
+            panel.roll_over_thread(native_thread, window, cx);
+        });
     }
 
     pub fn interrupt_and_send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1878,9 +1956,14 @@ impl ThreadView {
         }
 
         let contents = self.resolve_message_contents(&message_editor, cx);
+        let goal_mode = self.prompt_input_mode == PromptInputMode::Goal;
 
         cx.spawn_in(window, async move |this, cx| {
-            let (content, tracked_buffers) = contents.await?;
+            let (mut content, tracked_buffers) = contents.await?;
+
+            if goal_mode {
+                content = apply_goal_mode_to_contents(content);
+            }
 
             if content.is_empty() {
                 return Ok::<(), anyhow::Error>(());
@@ -3949,6 +4032,7 @@ impl ThreadView {
                                     .gap_0p5()
                                     .child(self.render_add_context_button(cx))
                                     .child(self.render_follow_toggle(cx))
+                                    .children(self.render_network_agent_control(cx))
                                     .children(self.render_fast_mode_control(cx))
                                     .children(self.render_thinking_control(cx)),
                             )
@@ -3959,9 +4043,12 @@ impl ThreadView {
                                     .children(self.render_token_usage(cx))
                                     .children(self.profile_selector.clone())
                                     .map(|this| match self.config_options_view.clone() {
-                                        Some(config_view) => this.child(config_view),
+                                        Some(config_view) => this
+                                            .child(config_view)
+                                            .children(self.render_goal_mode_control(cx)),
                                         None => this
                                             .children(self.mode_selector.clone())
+                                            .children(self.render_goal_mode_control(cx))
                                             .children(self.model_selector.clone()),
                                     })
                                     .child(self.render_send_button(cx)),
@@ -4353,6 +4440,278 @@ impl ThreadView {
             .and_then(|thread| thread.read(cx).model())
             .map(|model| model.supports_fast_mode())
             .unwrap_or(false)
+    }
+
+    pub fn set_prompt_input_mode(&mut self, mode: PromptInputMode, cx: &mut Context<Self>) {
+        self.prompt_input_mode = mode;
+        cx.notify();
+    }
+
+    fn render_goal_mode_control(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let native_thread = self.as_native_thread(cx)?;
+        let active_goal = native_thread.read(cx).goal().cloned();
+        let prompt_input_mode = self.prompt_input_mode;
+        let current_label = prompt_input_mode.label().to_string();
+
+        let icon = if self.goal_mode_menu_handle.is_deployed() {
+            IconName::ChevronUp
+        } else {
+            IconName::ChevronDown
+        };
+
+        let trigger_color = match (prompt_input_mode, active_goal.as_ref().map(|g| g.status)) {
+            (PromptInputMode::Goal, _) | (_, Some(GoalStatus::Active)) => Color::Accent,
+            _ => Color::Muted,
+        };
+
+        let trigger_button = Button::new("goal-mode-selector-trigger", current_label)
+            .label_size(LabelSize::Small)
+            .color(trigger_color)
+            .start_icon(
+                Icon::new(match prompt_input_mode {
+                    PromptInputMode::Chat => IconName::Chat,
+                    PromptInputMode::Goal => IconName::ListTodo,
+                })
+                .size(IconSize::XSmall)
+                .color(trigger_color),
+            )
+            .end_icon(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted));
+
+        let weak_self = cx.weak_entity();
+        let thread = native_thread.downgrade();
+
+        Some(
+            PopoverMenu::new("goal-mode-selector")
+                .trigger_with_tooltip(trigger_button, Tooltip::text("Input mode"))
+                .anchor(gpui::Anchor::BottomRight)
+                .with_handle(self.goal_mode_menu_handle.clone())
+                .offset(gpui::Point {
+                    x: px(0.0),
+                    y: px(-2.0),
+                })
+                .menu({
+                    let weak_self = weak_self.clone();
+                    let thread = thread.clone();
+                    move |window, cx| {
+                        let weak_self = weak_self.clone();
+                        let thread = thread.clone();
+                        Some(ContextMenu::build(window, cx, move |mut menu, _window, cx| {
+                            for mode in [PromptInputMode::Chat, PromptInputMode::Goal] {
+                                let is_selected = mode == prompt_input_mode;
+                                menu.push_item(
+                                    ContextMenuEntry::new(mode.label())
+                                        .toggleable(IconPosition::End, is_selected)
+                                        .handler({
+                                            let weak_self = weak_self.clone();
+                                            move |_window, cx| {
+                                                weak_self
+                                                    .update(cx, |this, cx| {
+                                                        this.set_prompt_input_mode(mode, cx);
+                                                    })
+                                                    .ok();
+                                            }
+                                        }),
+                                );
+                            }
+
+                            let Ok(Some(goal)) =
+                                thread.read_with(cx, |thread, _| thread.goal().cloned())
+                            else {
+                                return menu;
+                            };
+
+                            let status_summary = goal.status_summary();
+                            let goal_status = goal.status;
+
+                            menu = menu.separator().custom_row({
+                                let status_summary = status_summary.clone();
+                                move |_window, _cx| {
+                                    div()
+                                        .max_w(px(240.))
+                                        .child(
+                                            Label::new(status_summary.clone())
+                                                .size(LabelSize::Small),
+                                        )
+                                        .into_any_element()
+                                }
+                            });
+
+                            if goal_status == GoalStatus::Active {
+                                menu = menu.item(ContextMenuEntry::new("Pause Goal").handler({
+                                    let thread = thread.clone();
+                                    move |_window, cx| {
+                                        thread
+                                            .update(cx, |thread, cx| {
+                                                thread.apply_goal_command(
+                                                    GoalCommand::Pause,
+                                                    cx,
+                                                );
+                                            })
+                                            .ok();
+                                    }
+                                }));
+                            } else if goal_status == GoalStatus::Paused {
+                                menu = menu.item(ContextMenuEntry::new("Resume Goal").handler({
+                                    let thread = thread.clone();
+                                    move |_window, cx| {
+                                        thread
+                                            .update(cx, |thread, cx| {
+                                                thread.apply_goal_command(
+                                                    GoalCommand::Resume,
+                                                    cx,
+                                                );
+                                            })
+                                            .ok();
+                                    }
+                                }));
+                            }
+
+                            menu.item(ContextMenuEntry::new("Clear Goal").handler({
+                                let thread = thread.clone();
+                                let weak_self = weak_self.clone();
+                                move |_window, cx| {
+                                    thread
+                                        .update(cx, |thread, cx| {
+                                            thread.apply_goal_command(GoalCommand::Clear, cx);
+                                        })
+                                        .ok();
+                                    weak_self
+                                        .update(cx, |this, cx| {
+                                            this.set_prompt_input_mode(PromptInputMode::Chat, cx);
+                                        })
+                                        .ok();
+                                }
+                            }))
+                        }))
+                    }
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// Persists the Network Agent toggle and immediately re-points the current
+    /// thread at the appropriate model so the change takes effect right away.
+    fn toggle_network_agent(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        set_network_agent_enabled(enabled, cx);
+
+        let settings = agent_settings::AgentSettings::get_global(cx);
+        let selection = if enabled {
+            settings.network_agent.model.clone().map(|model| SelectedModel {
+                provider: LanguageModelProviderId::new(
+                    agent_settings::AgentSettings::NETWORK_AGENT_PROVIDER_ID,
+                ),
+                model: LanguageModelId::from(model),
+            })
+        } else {
+            settings.default_model.as_ref().map(|selection| SelectedModel {
+                provider: LanguageModelProviderId::from(selection.provider.0.clone()),
+                model: LanguageModelId::from(selection.model.clone()),
+            })
+        };
+
+        if let Some(selection) = selection {
+            let configured = LanguageModelRegistry::global(cx)
+                .update(cx, |registry, cx| registry.select_model(&selection, cx));
+            if let (Some(configured), Some(thread)) = (configured, self.as_native_thread(cx)) {
+                thread.update(cx, |thread, cx| thread.set_model(configured.model, cx));
+            }
+        }
+        cx.notify();
+    }
+
+    fn render_network_agent_control(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let settings = agent_settings::AgentSettings::get_global(cx);
+        let configured = settings.network_agent.model.clone();
+        let enabled = settings.network_agent.enabled && configured.is_some();
+
+        let icon = if self.network_agent_menu_handle.is_deployed() {
+            IconName::ChevronUp
+        } else {
+            IconName::ChevronDown
+        };
+
+        let color = if enabled { Color::Accent } else { Color::Muted };
+
+        let trigger_button = Button::new("network-agent-trigger", "Network")
+            .label_size(LabelSize::Small)
+            .color(color)
+            .start_icon(Icon::new(IconName::Server).size(IconSize::XSmall).color(color))
+            .end_icon(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted));
+
+        let workspace = self.workspace.clone();
+        let weak_self = cx.weak_entity();
+
+        Some(
+            PopoverMenu::new("network-agent-selector")
+                .trigger_with_tooltip(
+                    trigger_button,
+                    Tooltip::text(
+                        "Network Agent: a networked model orchestrates, your local model does the work",
+                    ),
+                )
+                .anchor(gpui::Anchor::BottomRight)
+                .with_handle(self.network_agent_menu_handle.clone())
+                .offset(gpui::Point {
+                    x: px(0.0),
+                    y: px(-2.0),
+                })
+                .menu({
+                    let workspace = workspace.clone();
+                    let weak_self = weak_self.clone();
+                    move |window, cx| {
+                        let workspace = workspace.clone();
+                        let weak_self = weak_self.clone();
+                        let configured = configured.clone();
+                        Some(ContextMenu::build(window, cx, move |mut menu, _window, _cx| {
+                            let has_config = configured.is_some();
+                            menu = menu.item(
+                                ContextMenuEntry::new("Network Agent")
+                                    .toggleable(IconPosition::End, enabled)
+                                    .disabled(!has_config)
+                                    .handler({
+                                        let weak_self = weak_self.clone();
+                                        move |_window, cx| {
+                                            weak_self
+                                                .update(cx, |this, cx| {
+                                                    this.toggle_network_agent(!enabled, cx);
+                                                })
+                                                .ok();
+                                        }
+                                    }),
+                            );
+
+                            menu = menu.separator().custom_row(move |_window, _cx| {
+                                let label = match configured.clone() {
+                                    Some(model) => format!("Model: {model}"),
+                                    None => "No network model configured".to_string(),
+                                };
+                                div()
+                                    .max_w(px(240.))
+                                    .child(
+                                        Label::new(label)
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                    )
+                                    .into_any_element()
+                            });
+
+                            menu.separator().item(
+                                ContextMenuEntry::new("Configure Network Agent…").handler({
+                                    let workspace = workspace.clone();
+                                    move |window, cx| {
+                                        workspace
+                                            .update(cx, |workspace, cx| {
+                                                NetworkAgentModal::toggle(workspace, window, cx);
+                                            })
+                                            .ok();
+                                    }
+                                }),
+                            )
+                        }))
+                    }
+                })
+                .into_any_element(),
+        )
     }
 
     fn render_fast_mode_control(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -9840,6 +10199,12 @@ impl ThreadView {
 
     fn render_token_limit_callout(&self, cx: &mut Context<Self>) -> Option<Callout> {
         if self.token_limit_callout_dismissed || self.as_native_thread(cx).is_none() {
+            return None;
+        }
+
+        // When automatic thread rollover is enabled, a too-long thread is rolled
+        // into a fresh one automatically, so the manual callout is redundant.
+        if AgentSettings::get_global(cx).auto_thread_rollover.enabled {
             return None;
         }
 

@@ -83,6 +83,10 @@ pub struct DbThread {
     pub ui_scroll_position: Option<SerializedScrollPosition>,
     #[serde(default)]
     pub sandboxed_terminal_temp_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub goal: Option<crate::ThreadGoal>,
+    #[serde(default)]
+    pub rolled_over: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -133,6 +137,8 @@ impl SharedThread {
             draft_prompt: None,
             ui_scroll_position: None,
             sandboxed_terminal_temp_dir: None,
+            goal: None,
+            rolled_over: false,
         }
     }
 
@@ -317,6 +323,8 @@ impl DbThread {
             draft_prompt: None,
             ui_scroll_position: None,
             sandboxed_terminal_temp_dir: None,
+            goal: None,
+            rolled_over: false,
         })
     }
 }
@@ -768,6 +776,8 @@ mod tests {
             draft_prompt: None,
             ui_scroll_position: None,
             sandboxed_terminal_temp_dir: None,
+            goal: None,
+            rolled_over: false,
         }
     }
 

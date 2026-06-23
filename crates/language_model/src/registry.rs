@@ -69,10 +69,10 @@ pub struct SelectedModel {
 impl FromStr for SelectedModel {
     type Err = String;
 
-    /// Parse string identifiers like `provider_id/model_id` into a `SelectedModel`
+    /// Parse string identifiers like `provider_id/model_id` into a `SelectedModel`.
+    /// Model ids may contain slashes (e.g. `lmstudio/google/gemma-4-e4b`).
     fn from_str(id: &str) -> Result<SelectedModel, Self::Err> {
-        let parts: Vec<&str> = id.split('/').collect();
-        let [provider_id, model_id] = parts.as_slice() else {
+        let Some((provider_id, model_id)) = id.split_once('/') else {
             return Err(format!(
                 "Invalid model identifier format: `{}`. Expected `provider_id/model_id`",
                 id
@@ -656,5 +656,12 @@ mod tests {
         });
 
         assert_eq!(registry.read(cx).visible_providers().len(), 1);
+    }
+
+    #[test]
+    fn selected_model_parses_model_ids_with_slashes() {
+        let model: SelectedModel = "lmstudio/google/gemma-4-e4b".parse().unwrap();
+        assert_eq!(model.provider.0, "lmstudio");
+        assert_eq!(model.model.0, "google/gemma-4-e4b");
     }
 }

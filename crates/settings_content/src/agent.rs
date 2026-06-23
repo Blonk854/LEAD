@@ -219,6 +219,53 @@ pub struct AgentSettingsContent {
     /// These are populated when choosing "Allow always" from a sandbox
     /// escalation prompt.
     pub sandbox_permissions: Option<SandboxPermissionsContent>,
+
+    /// Optional "Network Agent" configuration. When enabled, a model served
+    /// from a network endpoint drives the main agent (planning and tool calls)
+    /// while the local `default_model` handles delegated subagent work.
+    pub network_agent: Option<NetworkAgentSettingsContent>,
+
+    /// Automatically roll a too-long conversation into a fresh thread, seeded
+    /// with a robust hand-off summary, to keep the model performing well.
+    pub auto_thread_rollover: Option<AutoThreadRolloverContent>,
+}
+
+/// Configuration for automatic thread rollover and hand-off.
+///
+/// When a thread's context fills past `context_fraction` of the model's
+/// context window, LEAD generates a hand-off summary, opens a brand-new thread
+/// seeded with that summary (carrying any active goal), and switches to it.
+#[with_fallible_options]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq, Default)]
+pub struct AutoThreadRolloverContent {
+    /// Whether automatic thread rollover is enabled.
+    ///
+    /// Default: true
+    pub enabled: Option<bool>,
+    /// Fraction (0.0 - 1.0) of the model's context window at which a thread
+    /// rolls over into a fresh one. Lower values roll over sooner.
+    ///
+    /// Default: 0.75
+    pub context_fraction: Option<f32>,
+}
+
+/// Configuration for the optional "Network Agent" mode.
+///
+/// When enabled, a model served from a network endpoint drives the main agent
+/// (planning and tool calls) while the local `default_model` handles delegated
+/// subagent work. The network endpoint itself is configured as an
+/// OpenAI-compatible provider under the reserved id `network-agent`.
+#[with_fallible_options]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq, Default)]
+pub struct NetworkAgentSettingsContent {
+    /// Whether the Network Agent is currently enabled. When disabled, the
+    /// agent uses the local `default_model` for everything.
+    ///
+    /// Default: false
+    pub enabled: Option<bool>,
+    /// The id of the model (served from the configured network endpoint) to
+    /// use as the orchestrating agent model.
+    pub model: Option<String>,
 }
 
 impl AgentSettingsContent {

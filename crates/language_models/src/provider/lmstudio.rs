@@ -337,6 +337,22 @@ pub struct LmStudioLanguageModel {
     state: Entity<State>,
 }
 
+/// LM Studio's OpenAI-compatible API requires `parameters.properties` to be an object.
+/// Schemars omits `properties` for unit structs (e.g. tools with no arguments).
+fn normalize_lmstudio_tool_parameters(schema: serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Object(mut map) = schema else {
+        return serde_json::json!({ "type": "object", "properties": {} });
+    };
+
+    if !map.contains_key("properties") {
+        map.insert("properties".into(), serde_json::json!({}));
+    }
+    if !map.contains_key("type") {
+        map.insert("type".into(), serde_json::json!("object"));
+    }
+    serde_json::Value::Object(map)
+}
+
 impl LmStudioLanguageModel {
     fn to_lmstudio_request(
         &self,
@@ -436,7 +452,7 @@ impl LmStudioLanguageModel {
                     function: lmstudio::FunctionDefinition {
                         name: tool.name,
                         description: Some(tool.description),
-                        parameters: Some(tool.input_schema),
+                        parameters: Some(normalize_lmstudio_tool_parameters(tool.input_schema)),
                     },
                 })
                 .collect(),
@@ -547,12 +563,17 @@ impl LanguageModel for LmStudioLanguageModel {
 
 struct LmStudioEventMapper {
     tool_calls_by_index: HashMap<usize, RawToolCall>,
+    assistant_text: String,
+    /// Text used for embedded tool-call extraction (content + reasoning).
+    text_for_tool_extraction: String,
 }
 
 impl LmStudioEventMapper {
     fn new() -> Self {
         Self {
             tool_calls_by_index: HashMap::default(),
+            assistant_text: String::new(),
+            text_for_tool_extraction: String::new(),
         }
     }
 
@@ -581,10 +602,13 @@ impl LmStudioEventMapper {
 
         let mut events = Vec::new();
         if let Some(content) = choice.delta.content {
+            self.assistant_text.push_str(&content);
+            self.text_for_tool_extraction.push_str(&content);
             events.push(Ok(LanguageModelCompletionEvent::Text(content)));
         }
 
         if let Some(reasoning_content) = choice.delta.reasoning_content {
+            self.text_for_tool_extraction.push_str(&reasoning_content);
             events.push(Ok(LanguageModelCompletionEvent::Thinking {
                 text: reasoning_content,
                 signature: None,
@@ -601,18 +625,19 @@ impl LmStudioEventMapper {
 
                 if let Some(function) = tool_call.function {
                     if let Some(name) = function.name {
-                        // At the time of writing this code LM Studio (0.3.15) is incompatible with the OpenAI API:
-                        // 1. It sends function name in the first chunk
-                        // 2. It sends empty string in the function name field in all subsequent chunks for arguments
-                        // According to https://platform.openai.com/docs/guides/function-calling?api-mode=responses#streaming
-                        // function name field should be sent only inside the first chunk.
                         if !name.is_empty() {
-                            entry.name = name;
+                            entry.name = name.clone();
+                            if name.contains("<function=") || name.contains("<parameter=") {
+                                self.text_for_tool_extraction.push_str(&name);
+                            }
                         }
                     }
 
                     if let Some(arguments) = function.arguments {
                         entry.arguments.push_str(&arguments);
+                        if arguments.contains("<function=") || arguments.contains("<parameter=") {
+                            self.text_for_tool_extraction.push_str(&arguments);
+                        }
                     }
                 }
             }
@@ -629,28 +654,40 @@ impl LmStudioEventMapper {
 
         match choice.finish_reason.as_deref() {
             Some("stop") => {
-                events.push(Ok(LanguageModelCompletionEvent::Stop(StopReason::EndTurn)));
+                if self.tool_calls_by_index.is_empty() {
+                    let extracted = language_model::extract_tool_calls_from_text(
+                        &self.text_for_tool_extraction,
+                        &[],
+                    );
+                    if extracted.is_empty() {
+                        events.push(Ok(LanguageModelCompletionEvent::Stop(StopReason::EndTurn)));
+                    } else {
+                        for (index, call) in extracted.into_iter().enumerate() {
+                            events.push(Ok(LanguageModelCompletionEvent::ToolUse(
+                                LanguageModelToolUse {
+                                    id: format!("embedded_tool_{index}").into(),
+                                    name: call.name,
+                                    is_input_complete: true,
+                                    input: call.input,
+                                    raw_input: call.raw_input,
+                                    thought_signature: None,
+                                },
+                            )));
+                        }
+                        events.push(Ok(LanguageModelCompletionEvent::Stop(StopReason::ToolUse)));
+                    }
+                } else {
+                    events.extend(
+                        self.tool_calls_by_index
+                            .drain()
+                            .map(|(_, tool_call)| Ok(finish_lmstudio_tool_call(tool_call))),
+                    );
+                    events.push(Ok(LanguageModelCompletionEvent::Stop(StopReason::ToolUse)));
+                }
             }
             Some("tool_calls") => {
                 events.extend(self.tool_calls_by_index.drain().map(|(_, tool_call)| {
-                    match parse_tool_arguments(&tool_call.arguments) {
-                        Ok(input) => Ok(LanguageModelCompletionEvent::ToolUse(
-                            LanguageModelToolUse {
-                                id: tool_call.id.into(),
-                                name: tool_call.name.into(),
-                                is_input_complete: true,
-                                input,
-                                raw_input: tool_call.arguments,
-                                thought_signature: None,
-                            },
-                        )),
-                        Err(error) => Ok(LanguageModelCompletionEvent::ToolUseJsonParseError {
-                            id: tool_call.id.into(),
-                            tool_name: tool_call.name.into(),
-                            raw_input: tool_call.arguments.into(),
-                            json_parse_error: error.to_string(),
-                        }),
-                    }
+                    Ok(finish_lmstudio_tool_call(tool_call))
                 }));
 
                 events.push(Ok(LanguageModelCompletionEvent::Stop(StopReason::ToolUse)));
@@ -671,6 +708,63 @@ struct RawToolCall {
     id: String,
     name: String,
     arguments: String,
+}
+
+fn finish_lmstudio_tool_call(tool_call: RawToolCall) -> LanguageModelCompletionEvent {
+    let blob = format!("{}{}", tool_call.name, tool_call.arguments);
+
+    if let Some(repaired) =
+        language_model::repair_malformed_tool_use(&tool_call.name, &tool_call.arguments)
+    {
+        return tool_use_from_extracted(&tool_call.id, repaired);
+    }
+
+    if blob.contains('<') {
+        if let Some(call) = language_model::extract_tool_calls_from_text(&blob, &[])
+            .into_iter()
+            .next()
+        {
+            return tool_use_from_extracted(&tool_call.id, call);
+        }
+
+        return LanguageModelCompletionEvent::ToolUseJsonParseError {
+            id: tool_call.id.into(),
+            tool_name: tool_call.name.into(),
+            raw_input: blob.into(),
+            json_parse_error: "failed to parse embedded XML tool call".into(),
+        };
+    }
+
+    match parse_tool_arguments(&tool_call.arguments) {
+        Ok(input) => LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
+            id: tool_call.id.into(),
+            name: tool_call.name.into(),
+            is_input_complete: true,
+            input,
+            raw_input: tool_call.arguments,
+            thought_signature: None,
+        }),
+        Err(error) => LanguageModelCompletionEvent::ToolUseJsonParseError {
+            id: tool_call.id.into(),
+            tool_name: tool_call.name.into(),
+            raw_input: tool_call.arguments.into(),
+            json_parse_error: error.to_string(),
+        },
+    }
+}
+
+fn tool_use_from_extracted(
+    id: &str,
+    call: language_model::ExtractedToolCall,
+) -> LanguageModelCompletionEvent {
+    LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
+        id: id.into(),
+        name: call.name,
+        is_input_complete: true,
+        input: call.input,
+        raw_input: call.raw_input,
+        thought_signature: None,
+    })
 }
 
 fn add_message_content_part(

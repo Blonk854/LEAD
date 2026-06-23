@@ -4,11 +4,22 @@ use std::str::FromStr;
 ///
 /// Many LLM providers return empty strings for tool calls with no arguments.
 /// This helper normalizes that behavior by converting empty strings to `{}`.
+/// Malformed or truncated JSON is repaired when possible.
 pub fn parse_tool_arguments(arguments: &str) -> Result<serde_json::Value, serde_json::Error> {
     if arguments.is_empty() {
-        Ok(serde_json::Value::Object(Default::default()))
-    } else {
-        serde_json::Value::from_str(arguments)
+        return Ok(serde_json::Value::Object(Default::default()));
+    }
+
+    match serde_json::Value::from_str(arguments) {
+        Ok(value) => Ok(value),
+        Err(first_error) => {
+            let fixed = fix_streamed_json(arguments);
+            if fixed == arguments {
+                Err(first_error)
+            } else {
+                serde_json::Value::from_str(&fixed).map_err(|_| first_error)
+            }
+        }
     }
 }
 
@@ -107,5 +118,11 @@ mod tests {
 
         let delta = &text2[text1.len()..];
         assert_eq!(delta, "\n    return bar;\n}");
+    }
+
+    #[test]
+    fn test_parse_tool_arguments_repairs_truncated_json() {
+        let parsed = parse_tool_arguments(r#"{"path": "Cargo.toml""#).expect("repair");
+        assert_eq!(parsed["path"], "Cargo.toml");
     }
 }

@@ -811,6 +811,29 @@ fn mention_path_for_terminal(
     }
 }
 
+/// Builds the title for a thread created by automatic rollover, appending a
+/// "(cont.)" marker (and incrementing the count on repeated rollovers) so the
+/// continuation chain is recognizable in the sidebar.
+fn rollover_thread_title(source_title: &str) -> SharedString {
+    let trimmed = source_title.trim();
+    let base = if trimmed.is_empty() {
+        crate::DEFAULT_THREAD_TITLE
+    } else {
+        trimmed
+    };
+
+    // If the source already ends in "(cont.)" or "(cont. N)", bump the counter.
+    if let Some(prefix) = base.strip_suffix(')') {
+        if let Some((head, marker)) = prefix.rsplit_once("(cont.") {
+            let head = head.trim_end();
+            let next = marker.trim().parse::<u32>().unwrap_or(1).saturating_add(1);
+            return format!("{head} (cont. {next})").into();
+        }
+    }
+
+    format!("{base} (cont.)").into()
+}
+
 fn conflict_resource_block(conflict: &ConflictContent) -> acp::ContentBlock {
     let mention_uri = MentionUri::MergeConflict {
         file_path: conflict.file_path.clone(),
@@ -3351,6 +3374,99 @@ impl AgentPanel {
             })
         })
         .detach_and_log_err(cx);
+    }
+
+    /// Automatically rolls a too-long conversation into a fresh thread. The
+    /// source thread is summarized into a self-contained hand-off, a new thread
+    /// is created seeded with that summary, any active goal is carried over, and
+    /// (for goal-driven work) the new thread auto-resumes. The panel switches to
+    /// the new thread.
+    pub fn roll_over_thread(
+        &mut self,
+        source_thread: Entity<agent::Thread>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Snapshot the goal/title and kick off the hand-off summary before
+        // mutating anything. Mark the source rolled-over immediately so a slow
+        // summary can't allow a second rollover to fire.
+        let (goal, source_title, summary_task) = source_thread.update(cx, |thread, cx| {
+            let goal = thread.goal().cloned();
+            let title = thread.title().unwrap_or_default();
+            let summary_task = thread.generate_handoff_summary(cx);
+            thread.mark_rolled_over(cx);
+            (goal, title, summary_task)
+        });
+
+        let goal_active = goal.as_ref().is_some_and(|goal| goal.is_active());
+
+        cx.spawn_in(window, async move |this, cx| {
+            let summary = match summary_task.await {
+                Ok(summary) => summary,
+                Err(error) => {
+                    log::error!("Auto thread rollover: hand-off summary failed: {error:#}");
+                    return;
+                }
+            };
+
+            this.update_in(cx, |this, window, cx| {
+                let header = if goal_active {
+                    "Continuing automated work in a fresh thread to keep the model performing \
+                     well. Hand-off summary from the previous thread:"
+                } else {
+                    "Continuing in a fresh thread to keep the model performing well. Hand-off \
+                     summary from the previous thread:"
+                };
+                let mut body = format!("{header}\n\n{summary}");
+                if goal_active {
+                    body.push_str(
+                        "\n\nResume working toward the goal from where the previous thread left \
+                         off. Do not stop until the success criteria are verified.",
+                    );
+                }
+
+                let new_thread_id = this.create_thread_with_options(
+                    CreateThreadOptions {
+                        title: Some(rollover_thread_title(&source_title)),
+                        // Seed the summary but do not auto-submit here: we must
+                        // attach the carried-over goal before the first turn so
+                        // the system prompt and goal continuation see it.
+                        initial_content: Some(AgentInitialContent::ContentBlock {
+                            blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(body))],
+                            auto_submit: false,
+                        }),
+                        ..Default::default()
+                    },
+                    AgentThreadSource::AgentPanel,
+                    window,
+                    cx,
+                );
+
+                let Some(view) = this.retained_threads.get(&new_thread_id).cloned() else {
+                    return;
+                };
+
+                // Carry the goal onto the new native thread before sending.
+                if let Some(goal) = goal {
+                    if let Some(native) = view.read(cx).as_native_thread(cx) {
+                        native.update(cx, |native, cx| native.set_goal(goal, cx));
+                    }
+                }
+
+                // For goal-driven work, resume automatically now that the goal
+                // is attached. Non-goal rollovers leave the summary seeded for
+                // the user to continue.
+                if goal_active {
+                    if let Some(thread_view) = view.read(cx).root_thread_view() {
+                        thread_view.update(cx, |thread_view, cx| {
+                            thread_view.send(window, cx);
+                        });
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn initial_content_for_thread_summary(
@@ -6923,6 +7039,23 @@ mod tests {
     use project::{Project, WorktreePaths};
     use settings::{SettingsStore, WorkingDirectory};
     use std::any::Any;
+
+    #[test]
+    fn test_rollover_thread_title() {
+        assert_eq!(rollover_thread_title("Fix login bug"), "Fix login bug (cont.)");
+        assert_eq!(
+            rollover_thread_title("Fix login bug (cont.)"),
+            "Fix login bug (cont. 2)"
+        );
+        assert_eq!(
+            rollover_thread_title("Fix login bug (cont. 2)"),
+            "Fix login bug (cont. 3)"
+        );
+        assert_eq!(
+            rollover_thread_title("   "),
+            format!("{} (cont.)", crate::DEFAULT_THREAD_TITLE)
+        );
+    }
 
     use serde_json::json;
     use std::path::{Path, PathBuf};
@@ -10860,6 +10993,8 @@ mod tests {
             draft_prompt: None,
             ui_scroll_position: None,
             sandboxed_terminal_temp_dir: None,
+            goal: None,
+            rolled_over: false,
         };
 
         let thread_store = cx.update(|cx| ThreadStore::global(cx));

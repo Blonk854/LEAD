@@ -602,6 +602,8 @@ mod tests {
             show_merge_conflict_indicator: true,
             sidebar_side: Default::default(),
             thinking_display: Default::default(),
+            network_agent: Default::default(),
+            auto_thread_rollover: Default::default(),
         }
     }
 

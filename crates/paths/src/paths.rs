@@ -15,7 +15,16 @@ pub const EDITORCONFIG_NAME: &str = ".editorconfig";
 /// and state directory paths.
 ///
 /// Forks should change this to avoid colliding with Zed's user data.
-pub const APP_NAME: &str = "Zed";
+pub const APP_NAME: &str = "LEAD";
+
+/// When `true`, LEAD skips cloud/copilot/vim init and registers only local
+/// language-model providers (LM Studio, Ollama). Some backends still
+/// initialize because always-on UI depends on their globals: `channel`/`call`
+/// (title bar, notifications) and `repl` (quick action bar). Those features are
+/// instead hidden via defaults (e.g. `jupyter.enabled: false`).
+///
+/// Set to `false` to restore the full upstream-style provider and feature set.
+pub const LOCAL_ONLY: bool = true;
 
 /// Lowercased form of [`APP_NAME`], for use in XDG-style paths on
 /// Linux/FreeBSD and the macOS `~/.config` fallback.

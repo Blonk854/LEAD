@@ -15,12 +15,14 @@ pub mod draft_prompt_store;
 mod entry_view_state;
 mod external_source_prompt;
 mod favorite_models;
+mod goal_mode_selector;
 mod inline_assistant;
 mod inline_prompt_editor;
 mod language_model_selector;
 mod mention_set;
 mod message_editor;
 mod mode_selector;
+mod network_agent;
 mod model_selector;
 mod model_selector_popover;
 mod profile_selector;
@@ -80,6 +82,7 @@ pub use agent_diff::{AgentDiffPane, AgentDiffToolbar};
 pub use conversation_view::ConversationView;
 pub use conversation_view::open_markdown_in_workspace;
 pub use external_source_prompt::ExternalSourcePrompt;
+pub(crate) use goal_mode_selector::PromptInputMode;
 pub(crate) use mode_selector::ModeSelector;
 pub(crate) use model_selector::ModelSelector;
 pub(crate) use model_selector_popover::ModelSelectorPopover;
@@ -862,7 +865,8 @@ fn update_active_language_model_from_settings(cx: &mut App) {
         }
     }
 
-    let default = settings.default_model.as_ref().map(to_selected_model);
+    let effective_default = settings.effective_default_model();
+    let default = effective_default.as_ref().map(to_selected_model);
     let inline_assistant = settings
         .inline_assistant_model
         .as_ref()
@@ -950,6 +954,8 @@ mod tests {
             show_merge_conflict_indicator: true,
             sidebar_side: Default::default(),
             thinking_display: Default::default(),
+            network_agent: Default::default(),
+            auto_thread_rollover: Default::default(),
         };
 
         cx.update(|cx| {

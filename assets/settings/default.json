@@ -450,7 +450,7 @@
   "allow_rewrap": "in_comments",
   // Controls whether edit predictions are shown immediately (true)
   // or manually by triggering `editor::ShowEditPrediction` (false).
-  "show_edit_predictions": true,
+  "show_edit_predictions": false,
   // Controls whether edit predictions are shown in a given language scope.
   // Example: ["string", "comment"]
   "edit_predictions_disabled_in": [],
@@ -934,7 +934,7 @@
   },
   "collaboration_panel": {
     // Whether to show the collaboration panel button in the status bar.
-    "button": true,
+    "button": false,
     // Where to dock the collaboration panel. Can be 'left' or 'right'.
     "dock": "right",
     // Default width of the collaboration panel.
@@ -1035,33 +1035,20 @@
     // The default model to use when creating new threads.
     "default_model": {
       // The provider to use.
-      "provider": "zed.dev",
-      // The model to use.
-      "model": "claude-sonnet-4",
-      // Whether thinking is enabled.
+      "provider": "lmstudio",
+      // LM Studio API model id (GET http://localhost:1234/api/v0/models -> "id").
+      "model": "qwen/qwen3-14b",
+      // Disable thinking for faster tool calls on local reasoning models.
       "enable_thinking": false,
     },
     // Additional parameters for language model requests. When making a request to a model, parameters will be taken
     // from the last entry in this list that matches the model's provider and name. In each entry, both provider
     // and model are optional, so that you can specify parameters for either one.
     "model_parameters": [
-      // To set parameters for all requests to OpenAI models:
-      // {
-      //   "provider": "openai",
-      //   "temperature": 0.5
-      // }
-      //
-      // To set parameters for all requests in general:
-      // {
-      //   "temperature": 0
-      // }
-      //
-      // To set parameters for a specific provider and model:
-      // {
-      //   "provider": "zed.dev",
-      //   "model": "claude-sonnet-4",
-      //   "temperature": 1.0
-      // }
+      {
+        "provider": "lmstudio",
+        "temperature": 0.7
+      }
     ],
     // Permission rules for tool actions.
     //
@@ -1108,8 +1095,47 @@
     "single_file_review": false,
     // When enabled, show voting thumbs for feedback on agent edits.
     "enable_feedback": true,
-    "default_profile": "write",
+    // Optional "Network Agent" mode. When enabled, a model served from a
+    // network endpoint drives the main agent (planning and tool calls) while
+    // the local `default_model` handles delegated subagent work. Configure the
+    // network endpoint from the agent panel's Network Agent settings, which
+    // writes an `openai_compatible` provider with the id "network-agent".
+    "network_agent": {
+      "enabled": false
+    },
+    // Automatically roll a too-long conversation into a fresh thread, seeded
+    // with a robust hand-off summary, to keep local models performing well.
+    // When an active /goal is running, the new thread auto-resumes the work.
+    // `context_fraction` is the share of the model's context window at which
+    // rollover triggers (0.1 - 0.95).
+    "auto_thread_rollover": {
+      "enabled": true,
+      "context_fraction": 0.75
+    },
+    "default_profile": "local-agent",
     "profiles": {
+      "local-agent": {
+        "name": "Local Agent",
+        "enable_all_context_servers": false,
+        "tools": {
+          "read_file": true,
+          "grep": true,
+          "list_directory": true,
+          "find_path": true,
+          "edit_file": true,
+          "write_file": true,
+          "terminal": true,
+          "diagnostics": true,
+          "fetch": true,
+          "create_directory": true,
+          "copy_path": true,
+          "move_path": true,
+          "delete_path": true,
+          "update_plan": true,
+          "update_title": true,
+          "skill": true
+        }
+      },
       "write": {
         "name": "Write",
         "enable_all_context_servers": true,
@@ -1221,7 +1247,7 @@
     "show_merge_conflict_indicator": true,
   },
   // Whether the screen sharing icon is shown in the os status bar.
-  "show_call_status_icon": true,
+  "show_call_status_icon": false,
   // Whether to use language servers to provide code intelligence.
   "enable_language_server": true,
   // Whether to perform linked edits of associated ranges, if the language server supports it.
@@ -2381,6 +2407,29 @@
     },
     "lmstudio": {
       "api_url": "http://localhost:1234/api/v0",
+      "available_models": [
+        {
+          "name": "qwen/qwen3-14b",
+          "display_name": "Qwen3 14B (local)",
+          "max_tokens": 32768,
+          "supports_tool_calls": true,
+          "supports_images": false
+        },
+        {
+          "name": "bonsai-8b",
+          "display_name": "Bonsai 8B (local)",
+          "max_tokens": 32768,
+          "supports_tool_calls": true,
+          "supports_images": false
+        },
+        {
+          "name": "opus4.7-gods.ghost.codex-4b.gguf",
+          "display_name": "Opus 4.7 Ghost Codex 4B (local, tool-call stress test)",
+          "max_tokens": 32768,
+          "supports_tool_calls": true,
+          "supports_images": false
+        }
+      ]
     },
     "deepseek": {
       "api_url": "https://api.deepseek.com/v1",
@@ -2503,7 +2552,7 @@
   },
   // Jupyter settings
   "jupyter": {
-    "enabled": true,
+    "enabled": false,
     "kernel_selections": {},
     // Specify the language name as the key and the kernel name as the value.
     // "kernel_selections": {

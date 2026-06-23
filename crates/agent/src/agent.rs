@@ -1,4 +1,5 @@
 mod db;
+mod goal;
 mod legacy_thread;
 mod native_agent_server;
 pub mod outline;
@@ -14,6 +15,7 @@ mod tools;
 
 use context_server::ContextServerId;
 pub use db::*;
+pub use goal::*;
 use itertools::Itertools;
 pub use native_agent_server::NativeAgentServer;
 pub use pattern_extraction::*;
@@ -1869,6 +1871,94 @@ impl NativeAgent {
             .await
         })
     }
+
+    fn handle_goal_slash_command(
+        &self,
+        message_id: UserMessageId,
+        session_id: acp::SessionId,
+        goal_command: GoalCommand,
+        original_content: Vec<acp::ContentBlock>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<acp::PromptResponse>> {
+        let Some(state) = self.session_project_state(&session_id) else {
+            return Task::ready(Err(anyhow!("Project state not found for session")));
+        };
+        let path_style = state.project.read(cx).path_style(cx);
+
+        cx.spawn(async move |this, cx| {
+            let (acp_thread, thread) = this.update(cx, |this, _cx| {
+                let session = this
+                    .sessions
+                    .get(&session_id)
+                    .context("Failed to get session")?;
+                anyhow::Ok((session.acp_thread.clone(), session.thread.clone()))
+            })??;
+
+            match goal_command {
+                GoalCommand::Set {
+                    objective,
+                    token_budget,
+                } => {
+                    let response_stream = thread.update(cx, |thread, cx| {
+                        thread.apply_goal_command(
+                            GoalCommand::Set {
+                                objective: objective.clone(),
+                                token_budget,
+                            },
+                            cx,
+                        );
+                        thread.send(
+                            message_id,
+                            [UserMessageContent::Text(objective)],
+                            cx,
+                        )
+                    })?;
+
+                    cx.update(|cx| {
+                        NativeAgentConnection::handle_thread_events(
+                            response_stream,
+                            acp_thread.downgrade(),
+                            cx,
+                        )
+                    })
+                    .await
+                }
+                other => {
+                    let response = thread.update(cx, |thread, cx| {
+                        let response = thread.apply_goal_command(other, cx);
+                        thread.push_acp_user_block(
+                            message_id.clone(),
+                            original_content.clone(),
+                            path_style,
+                            cx,
+                        );
+                        thread.push_acp_agent_block(
+                            acp::ContentBlock::Text(acp::TextContent::new(response.clone())),
+                            cx,
+                        );
+                        response
+                    });
+
+                    acp_thread.update(cx, |acp_thread, cx| {
+                        for block in &original_content {
+                            acp_thread.push_user_content_block(
+                                Some(message_id.clone()),
+                                block.clone(),
+                                cx,
+                            );
+                        }
+                        acp_thread.push_assistant_content_block(
+                            acp::ContentBlock::Text(acp::TextContent::new(response)),
+                            false,
+                            cx,
+                        );
+                    });
+
+                    Ok(acp::PromptResponse::new(acp::StopReason::EndTurn))
+                }
+            }
+        })
+    }
 }
 
 /// Wrapper struct that implements the AgentConnection trait
@@ -2422,6 +2512,22 @@ impl acp_thread::AgentConnection for NativeAgentConnection {
         };
 
         if let Some(parsed_command) = Command::parse(&params.prompt) {
+            if parsed_command.prompt_name == "goal"
+                && parsed_command.explicit_server_id.is_none()
+                && parsed_command.skill_scope.is_none()
+            {
+                let goal_command = GoalCommand::parse(parsed_command.arg_value);
+                return self.0.update(cx, |agent, cx| {
+                    agent.handle_goal_slash_command(
+                        id,
+                        session_id.clone(),
+                        goal_command,
+                        params.prompt,
+                        cx,
+                    )
+                });
+            }
+
             // Skill scope qualifiers (`/:<name>` and
             // `/<worktree>:<name>`) use a colon separator that can't
             // collide with MCP's `/<server>.<name>` grammar. The popup
