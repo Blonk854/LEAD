@@ -602,7 +602,7 @@ impl SshRemoteConnection {
         let destination = connection_options.ssh_destination();
 
         let temp_dir = tempfile::Builder::new()
-            .prefix("zed-ssh-session")
+            .prefix("LEAD-ssh-session")
             .tempdir()?;
 
         // On non-Windows, check if the user already has an active ControlMaster
@@ -794,7 +794,7 @@ impl SshRemoteConnection {
             _ => version.to_string(),
         };
         let binary_name = format!(
-            "zed-remote-server-{}-{}{}",
+            "LEAD-remote-server-{}-{}{}",
             release_channel.dev_name(),
             version_str,
             if self.ssh_platform.os.is_windows() {
@@ -2089,7 +2089,7 @@ mod tests {
     #[test]
     fn test_build_command_quotes_env_assignment() -> Result<()> {
         let mut input_env = HashMap::default();
-        input_env.insert("ZED$(echo foo)".to_string(), "value".to_string());
+        input_env.insert("LEAD$(echo foo)".to_string(), "value".to_string());
 
         let command = build_command_posix(
             Some("remote_program".to_string()),
@@ -2111,7 +2111,7 @@ mod tests {
             .last()
             .context("missing remote command argument")?;
         assert!(
-            remote_command.contains("exec env 'ZED$(echo foo)=value' remote_program"),
+            remote_command.contains("exec env 'LEAD$(echo foo)=value' remote_program"),
             "expected env assignment to be quoted, got: {remote_command}"
         );
 

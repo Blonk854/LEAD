@@ -23,4 +23,6 @@ http_client.workspace = true
 language_model.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+url.workspace = true
+web_research.workspace = true
 web_search.workspace = true

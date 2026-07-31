@@ -208,10 +208,25 @@ pub struct FunctionContent {
 }
 
 #[derive(Serialize, Debug)]
+pub struct StreamOptions {
+    pub include_usage: bool,
+}
+
+impl Default for StreamOptions {
+    fn default() -> Self {
+        Self {
+            include_usage: true,
+        }
+    }
+}
+
+#[derive(Serialize, Debug)]
 pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
     pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<StreamOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -235,8 +250,11 @@ pub struct ChatResponse {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ChoiceDelta {
+    #[serde(default)]
     pub index: u32,
-    pub delta: ResponseMessageDelta,
+    /// Optional because some servers omit `delta` on terminal/usage chunks.
+    #[serde(default)]
+    pub delta: Option<ResponseMessageDelta>,
     pub finish_reason: Option<String>,
 }
 
@@ -292,9 +310,13 @@ pub enum ResponseStreamResult {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ResponseStreamEvent {
+    #[serde(default)]
     pub created: u32,
+    #[serde(default)]
     pub model: String,
+    #[serde(default)]
     pub object: String,
+    #[serde(default)]
     pub choices: Vec<ChoiceDelta>,
     pub usage: Option<Usage>,
 }
@@ -343,7 +365,7 @@ pub enum CompatibilityType {
     Mlx,
 }
 
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Default, Eq, PartialEq)]
 pub struct ResponseMessageDelta {
     pub role: Option<Role>,
     pub content: Option<String>,

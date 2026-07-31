@@ -147,10 +147,19 @@ impl settings::Settings for AllLanguageModelSettings {
                 .into_iter()
                 .map(|(key, value)| {
                     let provider_label = format!("OpenAI Compatible ({key})");
+                    let api_url = if key.as_ref()
+                        == crate::provider::open_ai_compatible::NETWORK_AGENT_PROVIDER_ID
+                    {
+                        crate::provider::open_ai_compatible::normalize_openai_compatible_api_url(
+                            &value.api_url,
+                        )
+                    } else {
+                        value.api_url
+                    };
                     (
                         key,
                         OpenAiCompatibleSettings {
-                            api_url: value.api_url,
+                            api_url,
                             available_models: value.available_models,
                             custom_headers: custom_headers_from(
                                 &provider_label,

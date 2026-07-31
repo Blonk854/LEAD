@@ -4,8 +4,11 @@ use fs::Fs;
 use gpui::{
     App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Render, Task, TaskExt,
 };
+use language_model::{
+    LanguageModel, LanguageModelId, LanguageModelProviderId, LanguageModelRegistry, SelectedModel,
+};
 use language_models::AllLanguageModelSettings;
-use language_models::provider::open_ai_compatible::{AvailableModel, ModelCapabilities};
+use language_models::provider::open_ai_compatible::{self, AvailableModel, ModelCapabilities};
 use settings::{OpenAiCompatibleSettingsContent, Settings, update_settings_file};
 use ui::{Banner, KeyBinding, Modal, ModalFooter, ModalHeader, Section, prelude::*};
 use ui_input::InputField;
@@ -27,6 +30,31 @@ pub fn set_network_agent_enabled(enabled: bool, cx: &mut App) {
             .get_or_insert_default();
         network_agent.enabled = Some(enabled);
     });
+    if enabled {
+        sync_network_agent_provider(cx);
+    }
+}
+
+/// Resolves a configured model selection from the registry.
+pub fn resolve_model_selection(
+    provider: &str,
+    model: &str,
+    cx: &mut App,
+) -> Option<std::sync::Arc<dyn LanguageModel>> {
+    let selected = SelectedModel {
+        provider: LanguageModelProviderId::from(provider.to_string()),
+        model: LanguageModelId::from(model.to_string()),
+    };
+    LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
+        registry
+            .select_model(&selected, cx)
+            .map(|configured| configured.model)
+    })
+}
+
+/// Loads Network Agent credentials into the provider so requests are not blocked on keychain I/O.
+pub fn sync_network_agent_provider(cx: &mut App) {
+    language_models::sync_network_agent_provider_credentials(cx);
 }
 
 fn single_line_input(
@@ -64,17 +92,21 @@ impl NetworkAgentInput {
             .cloned();
         let existing_model = existing.as_ref().and_then(|s| s.available_models.first());
 
+        let existing_api_url = existing
+            .as_ref()
+            .map(|s| open_ai_compatible::normalize_openai_compatible_api_url(&s.api_url));
+
         let api_url = single_line_input(
             "Endpoint URL",
             "http://192.168.1.50:1234/v1",
-            existing.as_ref().map(|s| s.api_url.as_str()),
+            existing_api_url.as_deref(),
             1,
             window,
             cx,
         );
         let api_key = cx.new(|cx| {
-            InputField::new(window, cx, "Optional for most local servers")
-                .label("API Key")
+            InputField::new(window, cx, "Leave blank for LM Studio / Ollama")
+                .label("API Key (optional)")
                 .tab_index(2)
                 .tab_stop(true)
                 .masked(true)
@@ -114,10 +146,11 @@ fn save_network_agent_to_settings(
     input: &NetworkAgentInput,
     cx: &mut App,
 ) -> Task<Result<(), SharedString>> {
-    let api_url = input.api_url.read(cx).text(cx);
-    if api_url.is_empty() {
+    let raw_api_url = input.api_url.read(cx).text(cx);
+    if raw_api_url.is_empty() {
         return Task::ready(Err("Endpoint URL cannot be empty".into()));
     }
+    let api_url = open_ai_compatible::normalize_openai_compatible_api_url(&raw_api_url);
 
     let model_name = input.model.read(cx).text(cx);
     if model_name.is_empty() {
@@ -129,13 +162,13 @@ fn save_network_agent_to_settings(
         _ => return Task::ready(Err("Context Window must be a positive number".into())),
     };
 
-    // Most local servers (LM Studio, Ollama) ignore the bearer token, but the
-    // OpenAI-compatible provider only counts as authenticated once a key is
-    // stored, so fall back to a harmless placeholder when none is provided.
+    // Most local servers (LM Studio, Ollama) ignore the bearer token. The
+    // network-agent provider treats a missing key as optional and uses a harmless
+    // placeholder when talking to the endpoint.
     let api_key = {
         let entered = input.api_key.read(cx).text(cx);
         if entered.is_empty() {
-            "network-agent".to_string()
+            open_ai_compatible::LOCAL_OPENAI_COMPATIBLE_PLACEHOLDER_API_KEY.to_string()
         } else {
             entered
         }
@@ -160,10 +193,13 @@ fn save_network_agent_to_settings(
 
     let fs = <dyn Fs>::global(cx);
     let credentials = cx.write_credentials(&api_url, "Bearer", api_key.as_bytes());
+    let default_model_for_summary = AgentSettings::get_global(cx).default_model.clone();
     cx.spawn(async move |cx| {
-        credentials
-            .await
-            .map_err(|_| SharedString::from("Failed to write API key to keychain"))?;
+        if let Err(error) = credentials.await {
+            log::warn!(
+                "Failed to store Network Agent API key in keychain (continuing anyway): {error}"
+            );
+        }
         let _ = cx.update(|cx| {
             update_settings_file(fs, cx, move |settings, _cx| {
                 settings
@@ -188,7 +224,22 @@ fn save_network_agent_to_settings(
                 network_agent.model = Some(model_name);
                 // Turn the Network Agent on once it has been configured.
                 network_agent.enabled = Some(true);
+
+                if settings
+                    .agent
+                    .get_or_insert_default()
+                    .thread_summary_model
+                    .is_none()
+                    && let Some(local_model) = default_model_for_summary
+                {
+                    settings.agent.get_or_insert_default().thread_summary_model = Some(local_model);
+                    log::info!(
+                        "Auto-set agent.thread_summary_model to local default_model for hybrid mode"
+                    );
+                }
             });
+            sync_network_agent_provider(cx);
+            crate::update_active_language_model_from_settings(cx);
         });
         Ok(())
     })
@@ -218,7 +269,9 @@ impl NetworkAgentModal {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| match result {
-                Ok(_) => cx.emit(DismissEvent),
+                Ok(_) => {
+                    cx.emit(DismissEvent);
+                }
                 Err(error) => {
                     this.last_error = Some(error);
                     cx.notify();
@@ -274,10 +327,12 @@ impl Render for NetworkAgentModal {
             .child(
                 Modal::new("network-agent", None)
                     .header(
-                        ModalHeader::new().headline("Configure Network Agent").description(
-                            "A model served on your network drives the agent; your local model \
+                        ModalHeader::new()
+                            .headline("Configure Network Agent")
+                            .description(
+                                "A model served on your network drives the agent; your local model \
                              handles delegated subagent work.",
-                        ),
+                            ),
                     )
                     .when_some(self.last_error.clone(), |this, error| {
                         this.section(

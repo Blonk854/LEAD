@@ -233,6 +233,11 @@ impl TerminalToolTest {
                 user_agents_md: None,
                 sandboxing: false,
                 active_goal: None,
+                project_memory: None,
+                hybrid_mode: false,
+                local_worker_model: None,
+                balanced_delegation: false,
+                full_access: false,
             };
             template.render(&Templates::new())?
         };

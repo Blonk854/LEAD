@@ -904,7 +904,7 @@ mod tests {
         let database = ThreadsDatabase::new(cx.executor()).unwrap();
         let thread_id = session_id("sandbox-temp-dir-thread");
         let temp_dir = tempfile::Builder::new()
-            .prefix("zed-agent-terminal-test-")
+            .prefix("LEAD-agent-terminal-test-")
             .tempdir()
             .unwrap()
             .keep();
@@ -933,7 +933,7 @@ mod tests {
         let database = ThreadsDatabase::new(cx.executor()).unwrap();
         let thread_id = session_id("sandbox-temp-dir-delete-thread");
         let temp_dir = tempfile::Builder::new()
-            .prefix("zed-agent-terminal-test-")
+            .prefix("LEAD-agent-terminal-test-")
             .tempdir()
             .unwrap()
             .keep();

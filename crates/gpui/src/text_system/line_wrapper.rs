@@ -390,7 +390,7 @@ impl LineWrapper {
         // `2^3`, `a~b`, `a=1`, `Self::new`, etc. Trailing punctuation like `,`, `.`, `:`, `;`
         // is included so it stays attached to the preceding word when wrapping.
         matches!(c, '-' | '_' | '.' | '\'' | '’' | '‘' | '$' | '%' | '@' | '#' | '^' | '~' | ',' | '=' | ':' | ';') ||
-        // `⋯` character is special used in Zed, to keep this at the end of the line.
+        // `⋯` character is special used in LEAD, to keep this at the end of the line.
         matches!(c, '⋯')
     }
 
@@ -995,7 +995,7 @@ mod tests {
         // URL case
         assert_word("github.com");
         assert_not_word("zed-industries/zed");
-        assert_not_word("zed-industries\\zed");
+        assert_not_word("zed-industries\\LEAD");
         assert_not_word("a=1&b=2");
         assert_not_word("foo?b=2");
 

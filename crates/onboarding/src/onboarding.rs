@@ -6,7 +6,7 @@ use fs::Fs;
 use gpui::{
     Action, AnyElement, App, AppContext, AsyncWindowContext, Context, Entity, EventEmitter,
     FocusHandle, Focusable, Global, IntoElement, KeyContext, Render, ScrollHandle, SharedString,
-    Subscription, Task, WeakEntity, Window, actions,
+    Subscription, Task, WeakEntity, Window, actions, img,
 };
 use notifications::status_toast::StatusToast;
 use project::agent_server_store::AllAgentServersSettings;
@@ -15,8 +15,8 @@ use serde::Deserialize;
 use settings::{SettingsStore, VsCodeSettingsSource};
 use std::sync::Arc;
 use ui::{
-    Divider, KeyBinding, ParentElement as _, StatefulInteractiveElement, Vector, VectorName,
-    WithScrollbar as _, prelude::*, rems_from_px,
+    Divider, KeyBinding, ParentElement as _, StatefulInteractiveElement, WithScrollbar as _,
+    prelude::*, rems_from_px,
 };
 
 pub use workspace::welcome::ShowWelcome;
@@ -346,18 +346,27 @@ impl Render for Onboarding {
                                     .child(
                                         h_flex()
                                             .gap_4()
-                                            .child(Vector::square(VectorName::ZedLogo, rems(2.5)))
+                                            .child(
+                                                img("images/lead_logo.png")
+                                                    .size(rems(2.5))
+                                                    .flex_none(),
+                                            )
                                             .child(
                                                 v_flex()
+                                                    .items_start()
                                                     .child(
-                                                        Headline::new("Welcome to Zed")
+                                                        Label::new("Welcome to")
+                                                            .size(LabelSize::Small)
+                                                            .color(Color::Muted),
+                                                    )
+                                                    .child(
+                                                        Headline::new("LEAD")
                                                             .size(HeadlineSize::Small),
                                                     )
                                                     .child(
-                                                        Label::new("The editor for what's next")
+                                                        Label::new("Write the future")
                                                             .color(Color::Muted)
-                                                            .size(LabelSize::Small)
-                                                            .italic(),
+                                                            .size(LabelSize::Small),
                                                     ),
                                             ),
                                     )

@@ -10,13 +10,13 @@ use gpui::{
     Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
     ParentElement, Render, Styled, Task, TaskExt, Window, actions,
 };
-use gpui::{WeakEntity, linear_color_stop, linear_gradient};
+use gpui::{WeakEntity, img, linear_color_stop, linear_gradient};
 use menu::{SelectNext, SelectPrevious};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::Settings;
-use ui::{ButtonLike, Divider, DividerColor, KeyBinding, Vector, VectorName, prelude::*};
+use ui::{ButtonLike, Divider, DividerColor, KeyBinding, prelude::*};
 use util::ResultExt;
 use zed_actions::{
     Extensions, OpenKeymap, OpenOnboarding, OpenSettings, assistant::ToggleFocus, command_palette,
@@ -32,7 +32,7 @@ pub struct OpenRecentProject {
 actions!(
     zed,
     [
-        /// Show the Zed welcome screen
+        /// Show the LEAD welcome screen
         ShowWelcome
     ]
 );
@@ -443,10 +443,10 @@ impl Render for WelcomePage {
                 .into_any_element()
         };
 
-        let welcome_label = if self.fallback_to_recent_projects {
-            "Welcome back to Zed"
+        let welcome_prefix = if self.fallback_to_recent_projects {
+            "Welcome back to"
         } else {
-            "Welcome to Zed"
+            "Welcome to"
         };
 
         h_flex()
@@ -473,14 +473,26 @@ impl Render for WelcomePage {
                             .justify_center()
                             .mb_4()
                             .gap_4()
-                            .child(Vector::square(VectorName::ZedLogo, rems_from_px(45.)))
+                            .items_center()
                             .child(
-                                v_flex().child(Headline::new(welcome_label)).child(
-                                    Label::new("The editor for what's next")
-                                        .size(LabelSize::Small)
-                                        .color(Color::Muted)
-                                        .italic(),
-                                ),
+                                img("images/lead_logo.png")
+                                    .size(rems_from_px(45.))
+                                    .flex_none(),
+                            )
+                            .child(
+                                v_flex()
+                                    .items_start()
+                                    .child(
+                                        Label::new(welcome_prefix)
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                    )
+                                    .child(Headline::new("LEAD"))
+                                    .child(
+                                        Label::new("Write the future")
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                    ),
                             ),
                     )
                     .child(first_section.render(Default::default(), &self.focus_handle))
@@ -682,8 +694,8 @@ mod tests {
     #[test]
     fn test_project_name_multiple() {
         // PathList sorts lexicographically, so filenames appear in alpha order
-        let paths = PathList::new(&["/home/user/zed", "/home/user/api"]);
-        assert_eq!(project_name(&paths), "api, zed");
+        let paths = PathList::new(&["/home/user/LEAD", "/home/user/api"]);
+        assert_eq!(project_name(&paths), "api, LEAD");
     }
 
     #[test]

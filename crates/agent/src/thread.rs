@@ -1,11 +1,16 @@
 use crate::{
-    ApplyCodeActionTool, CodeActionStore, ContextServerRegistry, CopyPathTool, CreateDirectoryTool,
-    CreateThreadTool, DbLanguageModel, DbThread, DeletePathTool, DiagnosticsTool, EditFileTool,
-    FetchTool, FindPathTool, FindReferencesTool, GetCodeActionsTool, GoToDefinitionTool, GrepTool,
-    ListAgentsAndModelsTool, ListDirectoryTool, MovePathTool, ProjectSnapshot, ReadFileTool,
-    RenameTool, SandboxedTerminalTool, SpawnAgentTool, SystemPromptTemplate, Template, Templates,
+    AppendToJournalTool, ApplyCodeActionTool, BrowsePageTool, CodeActionStore, ComputerUseTool,
+    ContextServerRegistry, CopyPathTool, CreateDirectoryTool, CreateThreadTool, DbLanguageModel,
+    DbThread, DeletePathTool, DiagnosticsTool, EditFileTool, FetchTool, FindPathTool,
+    FindReferencesTool, GetCodeActionsTool, GoToDefinitionTool, GrepTool, HttpRequestTool,
+    ListAgentsAndModelsTool, ListDirectoryTool, MovePathTool, ProcessControlTool, ProjectSnapshot,
+    RagIngestTool, RagSearchTool, ReadFileTool, ReadJournalTool, RenameTool, ResearchWebTool,
+    RunCodeTool, SandboxedTerminalTool, SpawnAgentTool, SystemPromptTemplate, Template, Templates,
     TerminalTool, ThreadGoal, ToolPermissionDecision, UpdatePlanTool, UpdateTitleTool, WebSearchTool,
-    WriteFileTool, decide_permission_from_settings,
+    WriteFileTool, decide_permission_from_settings, format_project_memory_context,
+    persist_summary_to_worktrees,
+    project_memory::worktree_roots,
+    repetition_watchdog::{RepetitionTrip, RepetitionWatchdog, RepetitionWatchdogConfig},
 };
 use acp_thread::{MentionUri, UserMessageId};
 use action_log::ActionLog;
@@ -20,7 +25,7 @@ use crate::sandboxing::{SandboxRequest, ThreadSandboxGrants, sandboxing_enabled}
 use agent_client_protocol::schema as acp;
 use agent_settings::{
     AgentProfileId, AgentSettings, COMPACTION_PROMPT, GOAL_CHECKPOINT_PROMPT, HANDOFF_PROMPT,
-    SUMMARIZE_THREAD_DETAILED_PROMPT, SUMMARIZE_THREAD_PROMPT,
+    NetworkAgentDelegationMode, SUMMARIZE_THREAD_DETAILED_PROMPT, SUMMARIZE_THREAD_PROMPT,
 };
 use anyhow::{Context as _, Result, anyhow};
 use chrono::{DateTime, Local, Utc};
@@ -70,6 +75,11 @@ use util::{ResultExt, debug_panic, markdown::MarkdownCodeBlock, paths::PathStyle
 use uuid::Uuid;
 
 const TOOL_CANCELED_MESSAGE: &str = "Tool canceled by user";
+const ANTI_LOOP_TOOL_CANCELED_MESSAGE: &str =
+    "Tool canceled because LEAD stopped a local-model repetition loop.";
+const ANTI_LOOP_TEXT_RECOVERY_PROMPT: &str = "The previous response was stopped after entering a repetition loop. The repeated suffix was removed. Reassess the latest request, then take the next concrete tool action or answer concisely without repeating prior text.";
+const ANTI_LOOP_THINKING_RECOVERY_PROMPT: &str = "Reasoning entered a repetition loop and was discarded. Do not continue that reasoning chain. Give a concise answer or one concrete next tool call.";
+const ANTI_LOOP_THINKING_MARKER: &str = "[thinking stopped: repetition loop]";
 pub const MAX_TOOL_NAME_LENGTH: usize = 64;
 pub const MAX_SUBAGENT_DEPTH: u8 = 1;
 
@@ -80,6 +90,39 @@ const AGENT_COMPACTION_REMAINING_TOKEN_BUDGET: u64 = 40_000;
 /// pass to be worthwhile, so we leave the thread uncompacted and let the UI warn
 /// the user instead.
 pub const MIN_COMPACTION_CONTEXT_WINDOW: u64 = 80_000;
+
+/// Minimum context window for proactive compaction on local LM Studio models.
+pub const MIN_LOCAL_COMPACTION_CONTEXT_WINDOW: u64 = 16_000;
+
+static LMSTUDIO_PROVIDER_ID: std::sync::LazyLock<LanguageModelProviderId> =
+    std::sync::LazyLock::new(|| LanguageModelProviderId::new("lmstudio"));
+
+/// Tools exposed on the network orchestrator main thread when hybrid balanced
+/// delegation is active. Subagents retain the full profile tool set.
+const ORCHESTRATOR_TOOLS: &[&str] = &[
+    ReadFileTool::NAME,
+    ListDirectoryTool::NAME,
+    FindPathTool::NAME,
+    UpdatePlanTool::NAME,
+    SpawnAgentTool::NAME,
+    AppendToJournalTool::NAME,
+    ReadJournalTool::NAME,
+    RagIngestTool::NAME,
+    RagSearchTool::NAME,
+    DiagnosticsTool::NAME,
+    UpdateTitleTool::NAME,
+    CreateThreadTool::NAME,
+    ListAgentsAndModelsTool::NAME,
+    FetchTool::NAME,
+];
+
+const FULL_ACCESS_TOOLS: &[&str] = &[
+    RunCodeTool::NAME,
+    ProcessControlTool::NAME,
+    HttpRequestTool::NAME,
+    ComputerUseTool::NAME,
+    BrowsePageTool::NAME,
+];
 
 /// Minimum context window for compaction while a goal is active (local models).
 pub const MIN_GOAL_COMPACTION_CONTEXT_WINDOW: u64 = 16_000;
@@ -790,7 +833,7 @@ pub struct SiblingThreadRequest {
     pub title: SharedString,
     /// The initial prompt to send to the new thread.
     pub prompt: String,
-    /// Optional agent ID to use. Defaults to the native Zed agent.
+    /// Optional agent ID to use. Defaults to the native LEAD agent.
     pub agent_id: Option<String>,
     /// Optional model override, as `provider/model-id`.
     /// Defaults to the user's configured default model for the agent.
@@ -834,7 +877,7 @@ pub struct AvailableAgent {
     pub id: String,
     /// Human-readable name shown in the UI.
     pub name: SharedString,
-    /// Whether this is Zed's built-in native agent.
+    /// Whether this is LEAD's built-in native agent.
     pub is_native: bool,
     /// Models available for this agent. May be empty if models are not
     /// enumerated up front (e.g., external agents that choose their own).
@@ -855,6 +898,9 @@ pub struct AvailableModel {
 pub enum ThreadEvent {
     UserMessage(UserMessage),
     AgentText(String),
+    ReplacePendingAgentText(String),
+    ReplacePendingAgentThinking(String),
+    BeginNewAssistantMessage,
     AgentThinking(String),
     ToolCall(acp::ToolCall),
     ToolCallUpdate(acp_thread::ToolCallUpdate),
@@ -1142,8 +1188,66 @@ enum CompletionError {
     MaxTokens,
     #[error("refusal")]
     Refusal,
+    #[error("LEAD stopped this turn because the local model entered a repetition loop.")]
+    AntiLoopCircuitBreak,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+struct CompletionEventOutcome {
+    tool_result: Option<Task<LanguageModelToolResult>>,
+    repetition_trip: Option<DetectedRepetition>,
+}
+
+impl CompletionEventOutcome {
+    fn empty() -> Self {
+        Self {
+            tool_result: None,
+            repetition_trip: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RepetitionStreamKind {
+    Text,
+    Thinking,
+}
+
+impl RepetitionStreamKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Thinking => "thinking",
+        }
+    }
+
+    fn recovery_prompt(self) -> &'static str {
+        match self {
+            Self::Text => ANTI_LOOP_TEXT_RECOVERY_PROMPT,
+            Self::Thinking => ANTI_LOOP_THINKING_RECOVERY_PROMPT,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DetectedRepetition {
+    trip: RepetitionTrip,
+    stream_kind: RepetitionStreamKind,
+}
+
+struct CompletionWatchdogs {
+    text: RepetitionWatchdog,
+    thinking: Option<RepetitionWatchdog>,
+}
+
+impl CompletionWatchdogs {
+    fn reset(&mut self) {
+        self.text.reset();
+        if let Some(watchdog) = self.thinking.as_mut() {
+            watchdog.reset();
+        }
+    }
 }
 
 pub struct Thread {
@@ -1196,7 +1300,7 @@ pub struct Thread {
     ui_scroll_position: Option<gpui::ListOffset>,
     /// Weak references to running subagent threads for cancellation propagation
     running_subagents: Vec<WeakEntity<Thread>>,
-    inherits_parent_model_settings: bool,
+    pub(crate) inherits_parent_model_settings: bool,
     sandboxed_terminal_temp_dir: Option<PathBuf>,
     /// Sandbox permissions the user approved "for the rest of the thread".
     /// Shared with each tool call's event stream so repeated requests for
@@ -1209,6 +1313,8 @@ pub struct Thread {
     /// Set once this thread has been auto-rolled into a fresh thread, so it is
     /// never rolled over again (prevents repeat/ping-pong rollovers).
     rolled_over: bool,
+    /// Hybrid worker-pool id assigned to this subagent thread, if any.
+    assigned_worker_id: Option<String>,
 }
 
 impl Thread {
@@ -1242,14 +1348,26 @@ impl Thread {
             depth: parent_thread.read(cx).depth() + 1,
         });
         thread.inherit_parent_settings(parent_thread, cx);
-        // When the Network Agent is active, the network model orchestrates as
-        // the parent's model and subagents do the heavy lifting on the local
-        // `default_model`. Otherwise honor an explicit `subagent_model`.
-        if let Some(subagent_model) = AgentSettings::get_global(cx).effective_subagent_model() {
+        let settings = AgentSettings::get_global(cx);
+        let pool_active =
+            settings.network_agent_active() && settings.network_agent.workers.is_active();
+        // When the Network Agent is active, subagents use the local worker model
+        // (or a worker-pool assignment applied after session creation). Otherwise
+        // honor an explicit `subagent_model`.
+        if !pool_active && let Some(subagent_model) = settings.effective_subagent_model() {
             thread.inherits_parent_model_settings = false;
             thread.apply_model_selection(&subagent_model, cx);
         }
         thread
+    }
+
+    pub(crate) fn assigned_worker_id(&self) -> Option<&str> {
+        self.assigned_worker_id.as_deref()
+    }
+
+    pub(crate) fn set_assigned_worker_id(&mut self, worker_id: String, cx: &mut Context<Self>) {
+        self.assigned_worker_id = Some(worker_id);
+        cx.notify();
     }
 
     pub fn new(
@@ -1344,6 +1462,7 @@ impl Thread {
             goal: None,
             pending_goal_verification: false,
             rolled_over: false,
+            assigned_worker_id: None,
         }
     }
 
@@ -1360,7 +1479,7 @@ impl Thread {
         self.profile_id = parent.profile_id.clone();
     }
 
-    fn apply_model_selection(
+    pub(crate) fn apply_model_selection(
         &mut self,
         selection: &LanguageModelSelection,
         cx: &mut Context<Self>,
@@ -1383,6 +1502,73 @@ impl Thread {
             .log_err();
     }
 
+    /// Validates that a hybrid subagent can resolve the configured local worker
+    /// model before `spawn_agent` creates a thread.
+    pub(crate) fn validate_hybrid_subagent_model(cx: &mut App) -> Result<()> {
+        let settings = AgentSettings::get_global(cx);
+        if !settings.network_agent_active() {
+            return Ok(());
+        }
+
+        if settings.network_agent.workers.is_active() {
+            let endpoints = settings
+                .network_agent
+                .workers
+                .resolved_endpoints(&settings.default_model);
+            if endpoints.is_empty() {
+                anyhow::bail!(
+                    "Hybrid worker pool has no enabled workers. Configure agent.network_agent.workers or agent.default_model."
+                );
+            }
+            for endpoint in endpoints {
+                let selection = LanguageModelSelection {
+                    provider: endpoint.provider.clone(),
+                    model: endpoint.model.clone(),
+                    enable_thinking: false,
+                    effort: None,
+                    speed: None,
+                };
+                if Self::resolve_model_from_selection(&selection, cx).is_none() {
+                    anyhow::bail!(
+                        "Hybrid worker `{}/{}` unavailable. Check the provider is configured and the server is reachable.",
+                        selection.provider.0,
+                        selection.model
+                    );
+                }
+            }
+            return Ok(());
+        }
+
+        let Some(selection) = settings.effective_subagent_model() else {
+            anyhow::bail!(
+                "Local worker model not configured. Set agent.default_model to your LM Studio model in settings."
+            );
+        };
+        if Self::resolve_model_from_selection(&selection, cx).is_none() {
+            anyhow::bail!(
+                "Local worker model `{}/{}` unavailable. Check LM Studio is running and agent.default_model is set.",
+                selection.provider.0,
+                selection.model
+            );
+        }
+        Ok(())
+    }
+
+    /// When Network Agent mode is on, the main thread must use the network model
+    /// even if an older persisted model (e.g. local LM Studio) is still on the thread.
+    pub fn ensure_network_agent_main_thread_model(&mut self, cx: &mut Context<Self>) {
+        if self.subagent_context.is_some() {
+            return;
+        }
+        let settings = AgentSettings::get_global(cx);
+        if !settings.network_agent_active() {
+            return;
+        }
+        if let Some(selection) = settings.effective_default_model() {
+            self.apply_model_selection(&selection, cx);
+        }
+    }
+
     pub fn id(&self) -> &acp::SessionId {
         &self.id
     }
@@ -1402,7 +1588,7 @@ impl Thread {
         }
 
         let temp_dir = tempfile::Builder::new()
-            .prefix("zed-agent-terminal-")
+            .prefix("LEAD-agent-terminal-")
             .tempdir()
             .context("failed to create sandboxed terminal temp directory")?;
         let temp_dir = temp_dir.keep();
@@ -1609,7 +1795,7 @@ impl Thread {
                 }
                 LanguageModelToolResultContent::Image(image) => Some(
                     acp::ToolCallContent::Content(acp::Content::new(acp::ContentBlock::Image(
-                        acp::ImageContent::new(image.source.clone(), "image/png"),
+                        acp::ImageContent::new(image.source.clone(), image.mime_type.to_string()),
                     ))),
                 ),
             })
@@ -1664,7 +1850,7 @@ impl Thread {
 
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
 
-        Self {
+        let mut thread = Self {
             id,
             prompt_id: PromptId::new(),
             title: if db_thread.title.is_empty() {
@@ -1714,7 +1900,12 @@ impl Thread {
             goal: db_thread.goal,
             pending_goal_verification: false,
             rolled_over: db_thread.rolled_over,
+            assigned_worker_id: None,
+        };
+        if thread.subagent_context.is_none() {
+            thread.ensure_network_agent_main_thread_model(cx);
         }
+        thread
     }
 
     pub fn to_db(&self, cx: &App) -> Task<DbThread> {
@@ -1829,6 +2020,54 @@ impl Thread {
         }
 
         cx.notify()
+    }
+
+    /// Re-resolve the current model from the registry so provider-refreshed
+    /// metadata (context window, capabilities) replaces the cached Arc.
+    pub fn refresh_model_from_registry(&mut self, cx: &mut Context<Self>) {
+        let Some(current) = self.model.clone() else {
+            return;
+        };
+        let selected = SelectedModel {
+            provider: current.provider_id(),
+            model: current.id(),
+        };
+        let Some(fresh) = LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
+            registry
+                .select_model(&selected, cx)
+                .map(|configured| configured.model)
+        }) else {
+            return;
+        };
+
+        let changed = fresh.max_token_count() != current.max_token_count()
+            || fresh.max_output_tokens() != current.max_output_tokens()
+            || fresh.supports_images() != current.supports_images()
+            || fresh.supports_tools() != current.supports_tools();
+        if changed {
+            self.set_model(fresh, cx);
+        }
+
+        if let Some(current_summary) = self.summarization_model.clone() {
+            let selected = SelectedModel {
+                provider: current_summary.provider_id(),
+                model: current_summary.id(),
+            };
+            if let Some(fresh_summary) =
+                LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
+                    registry
+                        .select_model(&selected, cx)
+                        .map(|configured| configured.model)
+                })
+            {
+                let summary_changed = fresh_summary.max_token_count()
+                    != current_summary.max_token_count()
+                    || fresh_summary.max_output_tokens() != current_summary.max_output_tokens();
+                if summary_changed {
+                    self.set_summarization_model(Some(fresh_summary), cx);
+                }
+            }
+        }
     }
 
     pub fn summarization_model(&self) -> Option<&Arc<dyn LanguageModel>> {
@@ -1953,6 +2192,10 @@ impl Thread {
         self.add_tool(FindPathTool::new(self.project.clone()));
         self.add_tool(GrepTool::new(self.project.clone()));
         self.add_tool(ListDirectoryTool::new(self.project.clone()));
+        self.add_tool(AppendToJournalTool::new(self.project.clone()));
+        self.add_tool(ReadJournalTool::new(self.project.clone()));
+        self.add_tool(RagIngestTool::new(self.project.clone()));
+        self.add_tool(RagSearchTool::new(self.project.clone()));
         self.add_tool(MovePathTool::new(self.project.clone()));
         if cx.has_flag::<UpdatePlanToolFeatureFlag>() {
             self.add_tool(UpdatePlanTool);
@@ -1965,6 +2208,12 @@ impl Thread {
             self.action_log.clone(),
             update_agent_location,
         ));
+        self.add_tool(RunCodeTool::new(self.project.clone(), environment.clone()));
+        self.add_tool(ProcessControlTool);
+        self.add_tool(HttpRequestTool::new(
+            self.project.read(cx).client().http_client(),
+        ));
+        self.add_tool(ComputerUseTool::default());
         // Register terminal tool variants; `enabled_tools` exposes the one
         // matching the current sandbox state to the model as `terminal`.
         self.add_tool(TerminalTool::new(self.project.clone(), environment.clone()));
@@ -1973,6 +2222,13 @@ impl Thread {
             environment.clone(),
         ));
         self.add_tool(WebSearchTool);
+        self.add_tool(ResearchWebTool::new(
+            self.project.read(cx).client().http_client(),
+            self.project.clone(),
+        ));
+        self.add_tool(BrowsePageTool::new(
+            self.project.read(cx).client().http_client(),
+        ));
 
         self.add_tool(DiagnosticsTool::new(self.project.clone()));
 
@@ -2133,10 +2389,14 @@ impl Thread {
                 Message::User(message) => {
                     self.request_token_usage.remove(&message.id);
                 }
-                Message::Agent(_) | Message::Resume | Message::Compaction(_) | Message::GoalContinuation(_) => {}
+                Message::Agent(_)
+                | Message::Resume
+                | Message::Compaction(_)
+                | Message::GoalContinuation(_) => {}
             }
         }
         self.clear_summary();
+        cx.emit(TokenUsageUpdated(self.latest_token_usage()));
         cx.notify();
         Ok(())
     }
@@ -2152,16 +2412,34 @@ impl Thread {
     }
 
     pub fn latest_token_usage(&self) -> Option<acp_thread::TokenUsage> {
-        let usage = self.latest_request_token_usage()?;
         let model = self.model.clone()?;
-        let input_tokens = total_input_tokens(usage);
+
+        if let Some(usage) = self.latest_request_token_usage() {
+            let input_tokens = total_input_tokens(usage);
+            return Some(acp_thread::TokenUsage {
+                max_tokens: model.max_token_count(),
+                max_output_tokens: model.max_output_tokens(),
+                used_tokens: usage.total_tokens(),
+                input_tokens,
+                output_tokens: usage.output_tokens,
+            });
+        }
+
+        // Providers that don't report usage (common with LM Studio / local
+        // OpenAI-compatible servers) still need a context meter. Estimate from
+        // message bytes (~4 chars/token) so the ring always has something to show.
+        let estimated = if self.messages.is_empty() {
+            0
+        } else {
+            self.estimate_context_tokens(self.messages.len())
+        };
 
         Some(acp_thread::TokenUsage {
             max_tokens: model.max_token_count(),
             max_output_tokens: model.max_output_tokens(),
-            used_tokens: usage.total_tokens(),
-            input_tokens,
-            output_tokens: usage.output_tokens,
+            used_tokens: estimated,
+            input_tokens: estimated,
+            output_tokens: 0,
         })
     }
 
@@ -2201,9 +2479,9 @@ impl Thread {
     }
 
     /// Translate a stored model selection into the configured model from the registry.
-    fn resolve_model_from_selection(
+    pub(crate) fn resolve_model_from_selection(
         selection: &LanguageModelSelection,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) -> Option<Arc<dyn LanguageModel>> {
         let selected = SelectedModel {
             provider: LanguageModelProviderId::from(selection.provider.0.clone()),
@@ -2244,6 +2522,7 @@ impl Thread {
 
         self.messages
             .push(Arc::new(Message::User(UserMessage { id, content })));
+        cx.emit(TokenUsageUpdated(self.latest_token_usage()));
         cx.notify();
 
         self.send_existing(cx)
@@ -2305,6 +2584,7 @@ impl Thread {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Result<mpsc::UnboundedReceiver<Result<ThreadEvent>>> {
+        self.ensure_network_agent_main_thread_model(cx);
         // Flush the old pending message synchronously before cancelling,
         // to avoid a race where the detached cancel task might flush the NEW
         // turn's pending message instead of the old one.
@@ -2353,6 +2633,9 @@ impl Thread {
                             Ok(CompletionError::MaxTokens) => {
                                 event_stream.send_stop(acp::StopReason::MaxTokens);
                             }
+                            Ok(error @ CompletionError::AntiLoopCircuitBreak) => {
+                                event_stream.send_error(error);
+                            }
                             Ok(CompletionError::Other(error)) | Err(error) => {
                                 event_stream.send_error(error);
                             }
@@ -2374,16 +2657,20 @@ impl Thread {
     ) -> Result<()> {
         let mut attempt = 0;
         let mut intent = CompletionIntent::UserPrompt;
+        let mut anti_loop_recoveries = 0_usize;
+        let mut recovery_instruction_pending: Option<RepetitionStreamKind> = None;
+        let turn_started_at = Instant::now();
         loop {
             let should_compact = cx.update(|cx| {
-                cx.has_flag::<HandoffFeatureFlag>()
+                let handoff_or_goal = cx.has_flag::<HandoffFeatureFlag>()
                     || this
                         .read_with(cx, |thread, _| {
-                            thread
-                                .goal
-                                .as_ref()
-                                .is_some_and(|goal| goal.is_active())
+                            thread.goal.as_ref().is_some_and(|goal| goal.is_active())
                         })
+                        .unwrap_or(false);
+                handoff_or_goal
+                    || this
+                        .read_with(cx, |thread, _| thread.uses_local_lmstudio_model())
                         .unwrap_or(false)
             });
 
@@ -2425,7 +2712,7 @@ impl Thread {
             // Re-read the model and refresh tools on each iteration so that
             // mid-turn changes (e.g. the user switches model, toggles tools,
             // or changes profile) take effect between tool-call rounds.
-            let (model, request) = this.update(cx, |this, cx| {
+            let (model, mut request) = this.update(cx, |this, cx| {
                 let model = this
                     .model
                     .clone()
@@ -2435,6 +2722,40 @@ impl Thread {
                 this.current_request_token_usage = TokenUsage::default();
                 anyhow::Ok((model, request))
             })??;
+            if let Some(stream_kind) = recovery_instruction_pending.take() {
+                request.messages.push(LanguageModelRequestMessage {
+                    role: Role::User,
+                    content: vec![stream_kind.recovery_prompt().into()],
+                    cache: false,
+                    reasoning_details: None,
+                });
+            }
+
+            let anti_loop_settings =
+                cx.update(|cx| AgentSettings::get_global(cx).anti_loop.clone());
+            let mut repetition_watchdogs = if anti_loop_settings.enabled
+                && model.provider_id() == *LMSTUDIO_PROVIDER_ID
+            {
+                Some(CompletionWatchdogs {
+                    text: RepetitionWatchdog::new(RepetitionWatchdogConfig {
+                        min_block_chars: anti_loop_settings.min_block_chars,
+                        max_block_chars: anti_loop_settings.max_block_chars,
+                        min_repeats: anti_loop_settings.min_repeats,
+                        min_text_chars_before_trip: anti_loop_settings.min_text_chars_before_trip,
+                    }),
+                    thinking: anti_loop_settings.watch_thinking.then(|| {
+                        RepetitionWatchdog::new(RepetitionWatchdogConfig {
+                            min_block_chars: anti_loop_settings.thinking_min_block_chars,
+                            max_block_chars: anti_loop_settings.thinking_max_block_chars,
+                            min_repeats: anti_loop_settings.thinking_min_repeats,
+                            min_text_chars_before_trip: anti_loop_settings
+                                .thinking_min_text_chars_before_trip,
+                        })
+                    }),
+                })
+            } else {
+                None
+            };
 
             telemetry::event!(
                 "Agent Thread Completion",
@@ -2458,6 +2779,7 @@ impl Thread {
                 FuturesUnordered::new();
             let mut early_tool_results: Vec<LanguageModelToolResult> = Vec::new();
             let mut cancelled = false;
+            let mut repetition_trip = None;
             loop {
                 // Race between getting the first event, tool completion, and cancellation.
                 let first_event = futures::select! {
@@ -2507,6 +2829,7 @@ impl Thread {
                 let batch_result = this.update(cx, |this, cx| {
                     let mut batch_tool_results = Vec::new();
                     let mut batch_error = None;
+                    let mut batch_repetition_trip = None;
 
                     for event in batch {
                         log::trace!("Received completion event: {:?}", event);
@@ -2515,11 +2838,19 @@ impl Thread {
                                 match this.handle_completion_event(
                                     event,
                                     event_stream,
+                                    repetition_watchdogs.as_mut(),
                                     cancellation_rx.clone(),
                                     cx,
                                 ) {
-                                    Ok(Some(task)) => batch_tool_results.push(task),
-                                    Ok(None) => {}
+                                    Ok(outcome) => {
+                                        if let Some(task) = outcome.tool_result {
+                                            batch_tool_results.push(task);
+                                        }
+                                        if let Some(trip) = outcome.repetition_trip {
+                                            batch_repetition_trip = Some(trip);
+                                            break;
+                                        }
+                                    }
                                     Err(err) => {
                                         batch_error = Some(err);
                                         break;
@@ -2534,12 +2865,16 @@ impl Thread {
                     }
 
                     cx.notify();
-                    (batch_tool_results, batch_error)
+                    (batch_tool_results, batch_error, batch_repetition_trip)
                 })?;
 
                 tool_results.extend(batch_result.0);
                 if let Some(err) = batch_result.1 {
                     error = Some(err.downcast()?);
+                    break;
+                }
+                if let Some(trip) = batch_result.2 {
+                    repetition_trip = Some(trip);
                     break;
                 }
             }
@@ -2563,6 +2898,58 @@ impl Thread {
                     running_turn.streaming_tool_inputs.drain();
                 }
             })?;
+
+            if let Some(detected) = repetition_trip {
+                let trip = detected.trip;
+                for tool_result in early_tool_results.drain(..) {
+                    Self::process_tool_result(this, event_stream, cx, tool_result)?;
+                }
+                drop(tool_results);
+
+                this.update(cx, |this, cx| {
+                    this.cancel_incomplete_pending_tools(
+                        event_stream,
+                        ANTI_LOOP_TOOL_CANCELED_MESSAGE,
+                    );
+                    this.flush_pending_message(cx);
+                    if this.title.is_none() {
+                        this.generate_title(cx);
+                    }
+                })?;
+
+                telemetry::event!(
+                    "Agent Anti-Loop Trip",
+                    provider = model.provider_id().to_string(),
+                    model = model.telemetry_id(),
+                    block_character_count = trip.block_char_count,
+                    repeat_count = trip.repeat_count,
+                    generated_text_character_count = trip.accepted_text_char_count,
+                    stream_kind = detected.stream_kind.as_str(),
+                );
+
+                if anti_loop_recoveries < anti_loop_settings.max_recoveries_per_turn {
+                    anti_loop_recoveries += 1;
+                    telemetry::event!(
+                        "Agent Anti-Loop Recovery",
+                        attempt = anti_loop_recoveries,
+                        stream_kind = detected.stream_kind.as_str(),
+                    );
+                    event_stream.begin_new_assistant_message();
+                    recovery_instruction_pending = Some(detected.stream_kind);
+                    intent = CompletionIntent::UserPrompt;
+                    attempt = 0;
+                    continue;
+                }
+
+                telemetry::event!(
+                    "Agent Anti-Loop Circuit Break",
+                    recovery_count = anti_loop_recoveries,
+                    turn_duration_ms = turn_started_at.elapsed().as_millis() as u64,
+                    final_text_character_count = trip.cutoff_char_index,
+                    stream_kind = detected.stream_kind.as_str(),
+                );
+                return Err(CompletionError::AntiLoopCircuitBreak.into());
+            }
 
             let mut extracted_tool_tasks = this.update(cx, |this, cx| {
                 this.try_extract_embedded_tool_calls(event_stream, cancellation_rx.clone(), cx)
@@ -2616,19 +3003,14 @@ impl Thread {
                     }
                 })?;
             } else if end_turn {
-                if let Err(error) = Self::perform_goal_checkpoint_if_needed(
-                    this,
-                    cancellation_rx.clone(),
-                    cx,
-                )
-                .await
+                if let Err(error) =
+                    Self::perform_goal_checkpoint_if_needed(this, cancellation_rx.clone(), cx).await
                 {
                     log::warn!("Goal checkpoint failed: {error:#}");
                 }
 
-                let should_continue = this.update(cx, |this, _cx| {
-                    this.maybe_continue_for_goal()
-                })?;
+                let should_continue =
+                    this.update(cx, |this, _cx| this.maybe_continue_for_goal())?;
                 if should_continue {
                     intent = CompletionIntent::UserPrompt;
                     attempt = 0;
@@ -2764,6 +3146,7 @@ impl Thread {
         log::debug!("Compaction succeeded:\n{summary}");
 
         this.update(cx, |this, cx| {
+            persist_summary_to_worktrees(&this.project, &summary, cx);
             if let Some(goal) = this.goal.as_mut() {
                 if goal.is_active() {
                     goal.push_checkpoint(summary.clone());
@@ -2803,6 +3186,7 @@ impl Thread {
         };
 
         let mut summary = String::new();
+        let mut thinking = String::new();
         let mut stream = model.stream_completion(request, cx).await?;
         loop {
             let event = futures::select! {
@@ -2819,11 +3203,18 @@ impl Thread {
                 break;
             };
 
-            if let LanguageModelCompletionEvent::Text(text) = event? {
-                summary.push_str(&text);
+            match event? {
+                LanguageModelCompletionEvent::Text(text) => summary.push_str(&text),
+                LanguageModelCompletionEvent::Thinking { text, .. } => thinking.push_str(&text),
+                _ => {}
             }
         }
 
+        let summary = if !summary.trim().is_empty() {
+            summary
+        } else {
+            thinking
+        };
         let summary = summary.trim().to_string();
         if summary.is_empty() {
             return Ok(());
@@ -2924,22 +3315,67 @@ impl Thread {
         &mut self,
         event: LanguageModelCompletionEvent,
         event_stream: &ThreadEventStream,
+        mut repetition_watchdogs: Option<&mut CompletionWatchdogs>,
         cancellation_rx: watch::Receiver<bool>,
         cx: &mut Context<Self>,
-    ) -> Result<Option<Task<LanguageModelToolResult>>> {
+    ) -> Result<CompletionEventOutcome> {
         log::trace!("Handling streamed completion event: {:?}", event);
         use LanguageModelCompletionEvent::*;
 
         match event {
             StartMessage { .. } => {
+                if let Some(watchdogs) = repetition_watchdogs.as_mut() {
+                    watchdogs.reset();
+                }
                 self.flush_pending_message(cx);
                 self.pending_message = Some(AgentMessage::default());
             }
-            Text(new_text) => self.handle_text_event(new_text, event_stream),
-            Thinking { text, signature } => {
-                self.handle_thinking_event(text, signature, event_stream)
+            Text(new_text) => {
+                let repetition_trip = self
+                    .handle_text_event(
+                        new_text,
+                        event_stream,
+                        repetition_watchdogs
+                            .as_mut()
+                            .map(|watchdogs| &mut watchdogs.text),
+                    )
+                    .map(|trip| DetectedRepetition {
+                        trip,
+                        stream_kind: RepetitionStreamKind::Text,
+                    });
+                return Ok(CompletionEventOutcome {
+                    tool_result: None,
+                    repetition_trip,
+                });
             }
-            RedactedThinking { data } => self.handle_redacted_thinking_event(data),
+            Thinking { text, signature } => {
+                let repetition_trip = self
+                    .handle_thinking_event(
+                        text,
+                        signature,
+                        event_stream,
+                        repetition_watchdogs
+                            .as_mut()
+                            .and_then(|watchdogs| watchdogs.thinking.as_mut()),
+                    )
+                    .map(|trip| DetectedRepetition {
+                        trip,
+                        stream_kind: RepetitionStreamKind::Thinking,
+                    });
+                return Ok(CompletionEventOutcome {
+                    tool_result: None,
+                    repetition_trip,
+                });
+            }
+            RedactedThinking { data } => {
+                if let Some(watchdog) = repetition_watchdogs
+                    .as_mut()
+                    .and_then(|watchdogs| watchdogs.thinking.as_mut())
+                {
+                    watchdog.reset();
+                }
+                self.handle_redacted_thinking_event(data)
+            }
             ReasoningDetails(details) => {
                 let last_message = self.pending_message();
                 // Store the last non-empty reasoning_details (overwrites earlier ones)
@@ -2953,7 +3389,15 @@ impl Thread {
                 }
             }
             ToolUse(tool_use) => {
-                return Ok(self.handle_tool_use_event(tool_use, event_stream, cancellation_rx, cx));
+                return Ok(CompletionEventOutcome {
+                    tool_result: self.handle_tool_use_event(
+                        tool_use,
+                        event_stream,
+                        cancellation_rx,
+                        cx,
+                    ),
+                    repetition_trip: None,
+                });
             }
             ToolUseJsonParseError {
                 id,
@@ -2961,15 +3405,18 @@ impl Thread {
                 raw_input,
                 json_parse_error,
             } => {
-                return Ok(self.handle_tool_use_json_parse_error_event(
-                    id,
-                    tool_name,
-                    raw_input,
-                    json_parse_error,
-                    event_stream,
-                    cancellation_rx,
-                    cx,
-                ));
+                return Ok(CompletionEventOutcome {
+                    tool_result: self.handle_tool_use_json_parse_error_event(
+                        id,
+                        tool_name,
+                        raw_input,
+                        json_parse_error,
+                        event_stream,
+                        cancellation_rx,
+                        cx,
+                    ),
+                    repetition_trip: None,
+                });
             }
             UsageUpdate(usage) => {
                 telemetry::event!(
@@ -2992,20 +3439,71 @@ impl Thread {
             Started | Queued { .. } => {}
         }
 
-        Ok(None)
+        Ok(CompletionEventOutcome::empty())
     }
 
-    fn handle_text_event(&mut self, new_text: String, event_stream: &ThreadEventStream) {
-        event_stream.send_text(&new_text);
-
+    fn handle_text_event(
+        &mut self,
+        new_text: String,
+        event_stream: &ThreadEventStream,
+        mut repetition_watchdog: Option<&mut RepetitionWatchdog>,
+    ) -> Option<RepetitionTrip> {
         let last_message = self.pending_message();
+        let previous_text_bytes =
+            if let Some(AgentMessageContent::Text(text)) = last_message.content.last() {
+                text.len()
+            } else {
+                // A new text block after tools/thinking must not reuse absolute
+                // byte offsets from earlier streamed text in this completion.
+                if let Some(watchdog) = repetition_watchdog.as_mut() {
+                    watchdog.reset();
+                }
+                0
+            };
+
         if let Some(AgentMessageContent::Text(text)) = last_message.content.last_mut() {
             text.push_str(&new_text);
         } else {
             last_message
                 .content
-                .push(AgentMessageContent::Text(new_text));
+                .push(AgentMessageContent::Text(new_text.clone()));
         }
+
+        let Some(trip) = repetition_watchdog.and_then(|watchdog| watchdog.push(&new_text)) else {
+            event_stream.send_text(&new_text);
+            return None;
+        };
+
+        let last_message = self.pending_message();
+        let Some(AgentMessageContent::Text(text)) = last_message.content.last_mut() else {
+            return Some(trip);
+        };
+        if !text.is_char_boundary(trip.cutoff_byte_index) {
+            log::error!(
+                "Anti-loop detector returned invalid UTF-8 boundary: {}",
+                trip.cutoff_byte_index
+            );
+            // Fail closed: never stream the looping chunk. Truncate to the nearest
+            // prior char boundary so history/UI still discard the repeated suffix.
+            let mut cutoff = trip.cutoff_byte_index.min(text.len());
+            while cutoff > 0 && !text.is_char_boundary(cutoff) {
+                cutoff -= 1;
+            }
+            text.truncate(cutoff);
+            event_stream.replace_pending_agent_text(text.clone());
+            return Some(trip);
+        }
+
+        let accepted_new_bytes = trip
+            .cutoff_byte_index
+            .saturating_sub(previous_text_bytes)
+            .min(new_text.len());
+        if accepted_new_bytes > 0 && new_text.is_char_boundary(accepted_new_bytes) {
+            event_stream.send_text(&new_text[..accepted_new_bytes]);
+        }
+        text.truncate(trip.cutoff_byte_index);
+        event_stream.replace_pending_agent_text(text.clone());
+        Some(trip)
     }
 
     fn handle_thinking_event(
@@ -3013,9 +3511,8 @@ impl Thread {
         new_text: String,
         new_signature: Option<String>,
         event_stream: &ThreadEventStream,
-    ) {
-        event_stream.send_thinking(&new_text);
-
+        mut repetition_watchdog: Option<&mut RepetitionWatchdog>,
+    ) -> Option<RepetitionTrip> {
         let last_message = self.pending_message();
         if let Some(AgentMessageContent::Thinking { text, signature }) =
             last_message.content.last_mut()
@@ -3023,11 +3520,30 @@ impl Thread {
             text.push_str(&new_text);
             *signature = new_signature.or(signature.take());
         } else {
+            if let Some(watchdog) = repetition_watchdog.as_mut() {
+                watchdog.reset();
+            }
             last_message.content.push(AgentMessageContent::Thinking {
-                text: new_text,
+                text: new_text.clone(),
                 signature: new_signature,
             });
         }
+
+        let Some(trip) = repetition_watchdog.and_then(|watchdog| watchdog.push(&new_text)) else {
+            event_stream.send_thinking(&new_text);
+            return None;
+        };
+
+        let last_message = self.pending_message();
+        let Some(AgentMessageContent::Thinking { text, signature }) =
+            last_message.content.last_mut()
+        else {
+            return Some(trip);
+        };
+        *text = ANTI_LOOP_THINKING_MARKER.to_string();
+        *signature = None;
+        event_stream.replace_pending_agent_thinking(text.clone());
+        Some(trip)
     }
 
     fn handle_redacted_thinking_event(&mut self, data: String) {
@@ -3216,12 +3732,7 @@ impl Thread {
                 is_input_complete: true,
                 thought_signature: None,
             };
-            return self.handle_tool_use_event(
-                tool_use,
-                event_stream,
-                cancellation_rx,
-                cx,
-            );
+            return self.handle_tool_use_event(tool_use, event_stream, cancellation_rx, cx);
         }
 
         let tool_use = LanguageModelToolUse {
@@ -3387,6 +3898,11 @@ impl Thread {
                     let event = event.log_err()?;
                     let text = match event {
                         LanguageModelCompletionEvent::Text(text) => text,
+                        LanguageModelCompletionEvent::Thinking { text, .. }
+                            if summary.is_empty() =>
+                        {
+                            text
+                        }
                         _ => continue,
                     };
 
@@ -3503,12 +4019,56 @@ impl Thread {
             .rev()
             .find_map(|message| match &**message {
                 Message::User(user_message) => Some(user_message),
-                Message::Agent(_) | Message::Resume | Message::Compaction(_) | Message::GoalContinuation(_) => None,
+                Message::Agent(_)
+                | Message::Resume
+                | Message::Compaction(_)
+                | Message::GoalContinuation(_) => None,
             })
     }
 
     fn pending_message(&mut self) -> &mut AgentMessage {
         self.pending_message.get_or_insert_default()
+    }
+
+    fn cancel_incomplete_pending_tools(
+        &mut self,
+        event_stream: &ThreadEventStream,
+        cancel_message: &str,
+    ) {
+        let Some(message) = self.pending_message.as_mut() else {
+            return;
+        };
+
+        let incomplete_tools = message
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                AgentMessageContent::ToolUse(tool_use)
+                    if !message.tool_results.contains_key(&tool_use.id) =>
+                {
+                    Some((tool_use.id.clone(), tool_use.name.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        for (tool_use_id, tool_name) in incomplete_tools {
+            event_stream.update_tool_call_fields(
+                &tool_use_id,
+                acp::ToolCallUpdateFields::new().status(acp::ToolCallStatus::Failed),
+                None,
+            );
+            message.tool_results.insert(
+                tool_use_id.clone(),
+                LanguageModelToolResult {
+                    tool_use_id,
+                    tool_name,
+                    is_error: true,
+                    content: vec![LanguageModelToolResultContent::Text(cancel_message.into())],
+                    output: None,
+                },
+            );
+        }
     }
 
     fn flush_pending_message(&mut self, cx: &mut Context<Self>) {
@@ -3709,7 +4269,26 @@ impl Thread {
             }
         }
 
+        let settings = AgentSettings::get_global(cx);
+        if !settings.full_access_enabled() {
+            tools.retain(|name, _| !FULL_ACCESS_TOOLS.contains(&name.as_ref()));
+        }
+        if settings.network_agent_active()
+            && !self.is_subagent()
+            && settings.network_agent_delegation_mode() == NetworkAgentDelegationMode::Balanced
+        {
+            tools.retain(|name, _| ORCHESTRATOR_TOOLS.contains(&name.as_ref()));
+        }
+
         tools
+    }
+
+    #[cfg(test)]
+    pub fn enabled_tool_names(&self, cx: &App) -> Vec<String> {
+        self.enabled_tools(cx)
+            .keys()
+            .map(|name| name.to_string())
+            .collect()
     }
 
     fn refresh_turn_tools(&mut self, cx: &App) {
@@ -3743,6 +4322,16 @@ impl Thread {
         subagent_session_id: &acp::SessionId,
         cx: &App,
     ) {
+        for subagent in &self.running_subagents {
+            if let Some(subagent) = subagent.upgrade() {
+                let thread = subagent.read(cx);
+                if thread.id() == subagent_session_id
+                    && let Some(worker_id) = thread.assigned_worker_id()
+                {
+                    crate::worker_pool::release_worker(worker_id);
+                }
+            }
+        }
         self.running_subagents.retain(|s| {
             s.upgrade()
                 .map_or(false, |s| s.read(cx).id() != subagent_session_id)
@@ -3829,7 +4418,11 @@ impl Thread {
             .is_some_and(|fullness| fullness >= context_fraction)
     }
 
-    pub fn apply_goal_command(&mut self, command: crate::GoalCommand, cx: &mut Context<Self>) -> String {
+    pub fn apply_goal_command(
+        &mut self,
+        command: crate::GoalCommand,
+        cx: &mut Context<Self>,
+    ) -> String {
         use crate::{GoalCommand, GoalStatus};
 
         match command {
@@ -3972,7 +4565,8 @@ impl Thread {
             goal.continuation_prompt()
         };
 
-        self.messages.push(Arc::new(Message::GoalContinuation(prompt.into())));
+        self.messages
+            .push(Arc::new(Message::GoalContinuation(prompt.into())));
         true
     }
 
@@ -3988,6 +4582,7 @@ impl Thread {
             messages.extend(message.to_request());
         }
 
+        prune_stale_computer_use_screenshots(&mut messages);
         messages
     }
 
@@ -4001,14 +4596,30 @@ impl Thread {
         log::trace!("Building request messages from {} thread messages", end_ix);
 
         let user_agents_md = UserAgentsMd::global(cx).and_then(|s| s.content().cloned());
+        let project_memory = format_project_memory_context(&worktree_roots(&self.project, cx))
+            .map(SharedString::from);
+        let agent_settings = AgentSettings::get_global(cx);
+        let hybrid_mode = !self.is_subagent() && agent_settings.network_agent_active();
+        let local_worker_model = if hybrid_mode {
+            agent_settings.hybrid_worker_model_label()
+        } else {
+            None
+        };
         let system_prompt = SystemPromptTemplate {
             project: self.project_context.read(cx),
             available_tools,
             model_name: self.model.as_ref().map(|m| m.name().0.to_string()),
             date: Local::now().format("%Y-%m-%d").to_string(),
             user_agents_md,
+            project_memory,
             sandboxing: crate::sandboxing::sandboxing_enabled(cx),
             active_goal: self.goal.as_ref(),
+            hybrid_mode,
+            local_worker_model,
+            balanced_delegation: hybrid_mode
+                && agent_settings.network_agent_delegation_mode()
+                    == NetworkAgentDelegationMode::Balanced,
+            full_access: agent_settings.full_access_enabled(),
         }
         .render(&self.templates)
         .context("failed to build system prompt")
@@ -4025,6 +4636,7 @@ impl Thread {
             last_message.cache = true;
         }
 
+        prune_stale_computer_use_screenshots(&mut messages);
         messages
     }
 
@@ -4044,10 +4656,9 @@ impl Thread {
             &*self.messages[compaction_ix],
             Message::Compaction(CompactionInfo::Summary(_))
         ) {
-            messages.extend(self.retained_user_request_messages_before(
-                compaction_ix,
-                self.model.as_ref(),
-            ));
+            messages.extend(
+                self.retained_user_request_messages_before(compaction_ix, self.model.as_ref()),
+            );
         }
 
         for message in &self.messages[compaction_ix..end_ix] {
@@ -4062,15 +4673,25 @@ impl Thread {
     }
 
     fn min_compaction_context_window(&self) -> u64 {
-        if self
-            .goal
-            .as_ref()
-            .is_some_and(|goal| goal.is_active())
-        {
+        if self.goal.as_ref().is_some_and(|goal| goal.is_active()) {
             MIN_GOAL_COMPACTION_CONTEXT_WINDOW
+        } else if self.uses_local_lmstudio_model() || self.uses_local_summarization_model() {
+            MIN_LOCAL_COMPACTION_CONTEXT_WINDOW
         } else {
             MIN_COMPACTION_CONTEXT_WINDOW
         }
+    }
+
+    fn uses_local_lmstudio_model(&self) -> bool {
+        self.model
+            .as_ref()
+            .is_some_and(|model| model.provider_id() == *LMSTUDIO_PROVIDER_ID)
+    }
+
+    fn uses_local_summarization_model(&self) -> bool {
+        self.summarization_model
+            .as_ref()
+            .is_some_and(|model| model.provider_id() == *LMSTUDIO_PROVIDER_ID)
     }
 
     fn build_goal_checkpoint_request(
@@ -4088,11 +4709,13 @@ impl Thread {
 
         messages.push(LanguageModelRequestMessage {
             role: Role::User,
-            content: vec![format!(
-                "{GOAL_CHECKPOINT_PROMPT}\n\nObjective: {}\nSuccess criteria: {}",
-                goal.objective, goal.success_criteria
-            )
-            .into()],
+            content: vec![
+                format!(
+                    "{GOAL_CHECKPOINT_PROMPT}\n\nObjective: {}\nSuccess criteria: {}",
+                    goal.objective, goal.success_criteria
+                )
+                .into(),
+            ],
             cache: false,
             reasoning_details: None,
         });
@@ -4108,27 +4731,43 @@ impl Thread {
     }
 
     fn estimate_context_tokens(&self, up_to_ix: usize) -> u64 {
-        let bytes: usize = self.messages[..up_to_ix.min(self.messages.len())]
+        let mut messages: Vec<LanguageModelRequestMessage> = self.messages
+            [..up_to_ix.min(self.messages.len())]
             .iter()
             .flat_map(|message| message.to_request())
-            .flat_map(|request| request.content)
-            .map(|content| match content {
-                MessageContent::Text(text) => text.len(),
-                MessageContent::Image(image) => image.len(),
-                MessageContent::Thinking { text, .. } => text.len(),
-                MessageContent::RedactedThinking(_) => 0,
-                MessageContent::ToolResult(result) => result
-                    .content
-                    .iter()
-                    .map(|part| match part {
-                        LanguageModelToolResultContent::Text(text) => text.len(),
-                        LanguageModelToolResultContent::Image(image) => image.len(),
-                    })
-                    .sum(),
-                MessageContent::ToolUse(tool_use) => tool_use.input.to_string().len(),
-            })
-            .sum();
-        (bytes / 4).max(1) as u64
+            .collect();
+        prune_stale_computer_use_screenshots(&mut messages);
+
+        let mut text_bytes: usize = 0;
+        let mut image_tokens: u64 = 0;
+        for message in messages {
+            for content in message.content {
+                match content {
+                    MessageContent::Text(text) => text_bytes += text.len(),
+                    MessageContent::Image(image) => image_tokens += image.estimate_tokens(),
+                    MessageContent::Thinking { text, .. } => text_bytes += text.len(),
+                    MessageContent::RedactedThinking(_) => {}
+                    MessageContent::ToolResult(result) => {
+                        for part in result.content {
+                            match part {
+                                LanguageModelToolResultContent::Text(text) => {
+                                    text_bytes += text.len();
+                                }
+                                LanguageModelToolResultContent::Image(image) => {
+                                    image_tokens += image.estimate_tokens();
+                                }
+                            }
+                        }
+                    }
+                    MessageContent::ToolUse(tool_use) => {
+                        text_bytes += tool_use.input.to_string().len();
+                    }
+                }
+            }
+        }
+        ((text_bytes / 4) as u64)
+            .saturating_add(image_tokens)
+            .max(1)
     }
 
     fn compaction_message_target_ix(&self) -> Option<usize> {
@@ -4162,7 +4801,10 @@ impl Thread {
         let reported_tokens = total_input_tokens(usage).saturating_add(usage.output_tokens);
         let active_tokens = if reported_tokens > 0 {
             reported_tokens
-        } else if self.goal.as_ref().is_some_and(|goal| goal.is_active()) {
+        } else if self.goal.as_ref().is_some_and(|goal| goal.is_active())
+            || self.uses_local_lmstudio_model()
+            || self.uses_local_summarization_model()
+        {
             self.estimate_context_tokens(usage_ix.saturating_add(1))
         } else {
             return None;
@@ -4268,12 +4910,25 @@ impl Thread {
         cx.spawn(async move |_this, cx| {
             let mut stream = model.stream_completion(request, cx).await?;
             let mut summary = String::new();
+            let mut thinking = String::new();
             while let Some(event) = stream.next().await {
-                if let LanguageModelCompletionEvent::Text(text) = event? {
-                    summary.push_str(&text);
+                match event? {
+                    LanguageModelCompletionEvent::Text(text) => summary.push_str(&text),
+                    // Some local/reasoning models put the whole hand-off into
+                    // reasoning_content and leave content empty. Prefer Text,
+                    // but fall back to Thinking so rollover can still proceed.
+                    LanguageModelCompletionEvent::Thinking { text, .. } => {
+                        thinking.push_str(&text);
+                    }
+                    _ => {}
                 }
             }
 
+            let summary = if !summary.trim().is_empty() {
+                summary
+            } else {
+                thinking
+            };
             let summary = summary.trim().to_string();
             if summary.is_empty() {
                 anyhow::bail!("Hand-off summary was empty");
@@ -4467,13 +5122,64 @@ fn total_input_tokens(usage: language_model::TokenUsage) -> u64 {
         .saturating_add(usage.cache_read_input_tokens)
 }
 
+/// How many recent `computer_use` screenshots to keep in outbound model requests.
+const KEPT_COMPUTER_USE_SCREENSHOTS: usize = 2;
+
+/// Keep the latest `computer_use` screenshots in the outbound model request.
+/// Older screenshots are replaced with a short text stub so local context windows
+/// are not flooded by repeated full-screen images. UI/DB history is unchanged.
+fn prune_stale_computer_use_screenshots(messages: &mut [LanguageModelRequestMessage]) {
+    let mut image_sites = Vec::new();
+    for (message_ix, message) in messages.iter().enumerate() {
+        for (content_ix, content) in message.content.iter().enumerate() {
+            let MessageContent::ToolResult(result) = content else {
+                continue;
+            };
+            if result.tool_name.as_ref() != ComputerUseTool::NAME {
+                continue;
+            }
+            if result
+                .content
+                .iter()
+                .any(|part| matches!(part, LanguageModelToolResultContent::Image(_)))
+            {
+                image_sites.push((message_ix, content_ix));
+            }
+        }
+    }
+
+    let keep = KEPT_COMPUTER_USE_SCREENSHOTS;
+    if image_sites.len() <= keep {
+        return;
+    }
+
+    let omit_until = image_sites.len() - keep;
+    for &(message_ix, content_ix) in &image_sites[..omit_until] {
+        let MessageContent::ToolResult(result) = &mut messages[message_ix].content[content_ix]
+        else {
+            continue;
+        };
+        result.content = result
+            .content
+            .iter()
+            .map(|part| match part {
+                LanguageModelToolResultContent::Image(_) => {
+                    LanguageModelToolResultContent::Text(Arc::from("[earlier screenshot omitted]"))
+                }
+                other => other.clone(),
+            })
+            .collect();
+    }
+}
+
 fn user_message_byte_len(message: &LanguageModelRequestMessage) -> usize {
     message
         .content
         .iter()
         .map(|content| match content {
             MessageContent::Text(text) => text.len(),
-            MessageContent::Image(image) => image.len(),
+            // Approximate the same "byte budget" units used for text (~4 bytes/token).
+            MessageContent::Image(image) => image_budget_bytes(image),
             // These can never occur in a user message
             MessageContent::Thinking { .. }
             | MessageContent::RedactedThinking(_)
@@ -4481,6 +5187,10 @@ fn user_message_byte_len(message: &LanguageModelRequestMessage) -> usize {
             | MessageContent::ToolUse(_) => 0,
         })
         .sum()
+}
+
+fn image_budget_bytes(image: &LanguageModelImage) -> usize {
+    (image.estimate_tokens() as usize).saturating_mul(4)
 }
 
 fn truncate_user_message_to_byte_budget(
@@ -4502,7 +5212,7 @@ fn truncate_user_message_to_byte_budget(
                 }
             }
             MessageContent::Image(image) => {
-                let byte_len = image.len();
+                let byte_len = image_budget_bytes(&image);
                 if let Some(bytes) = remaining_bytes.checked_sub(byte_len) {
                     remaining_bytes = bytes;
                     content.push(MessageContent::Image(image));
@@ -4773,7 +5483,7 @@ where
     Self: 'static + Sized,
 {
     type Input: for<'de> Deserialize<'de> + Serialize + JsonSchema;
-    type Output: for<'de> Deserialize<'de> + Serialize + Into<LanguageModelToolResultContent>;
+    type Output: for<'de> Deserialize<'de> + Serialize + IntoToolLlmOutput;
 
     const NAME: &'static str;
 
@@ -4847,6 +5557,20 @@ pub struct Erased<T>(T);
 pub struct AgentToolOutput {
     pub llm_output: Vec<LanguageModelToolResultContent>,
     pub raw_output: serde_json::Value,
+}
+
+/// Converts a typed tool output into one or more content parts for the model.
+pub trait IntoToolLlmOutput {
+    fn into_tool_llm_output(self) -> Vec<LanguageModelToolResultContent>;
+}
+
+impl<T> IntoToolLlmOutput for T
+where
+    T: Into<LanguageModelToolResultContent>,
+{
+    fn into_tool_llm_output(self) -> Vec<LanguageModelToolResultContent> {
+        vec![self.into()]
+    }
 }
 
 impl From<anyhow::Error> for AgentToolOutput {
@@ -4942,7 +5666,7 @@ where
                 });
                 Ok(AgentToolOutput {
                     raw_output,
-                    llm_output: vec![output.into()],
+                    llm_output: output.into_tool_llm_output(),
                 })
             }
             Err(error_output) => {
@@ -4951,7 +5675,7 @@ where
                     serde_json::Value::Null
                 });
                 Err(AgentToolOutput {
-                    llm_output: vec![error_output.into()],
+                    llm_output: error_output.into_tool_llm_output(),
                     raw_output,
                 })
             }
@@ -4984,6 +5708,24 @@ impl ThreadEventStream {
     fn send_text(&self, text: &str) {
         self.0
             .unbounded_send(Ok(ThreadEvent::AgentText(text.to_string())))
+            .ok();
+    }
+
+    fn replace_pending_agent_text(&self, text: String) {
+        self.0
+            .unbounded_send(Ok(ThreadEvent::ReplacePendingAgentText(text)))
+            .ok();
+    }
+
+    fn replace_pending_agent_thinking(&self, text: String) {
+        self.0
+            .unbounded_send(Ok(ThreadEvent::ReplacePendingAgentThinking(text)))
+            .ok();
+    }
+
+    fn begin_new_assistant_message(&self) {
+        self.0
+            .unbounded_send(Ok(ThreadEvent::BeginNewAssistantMessage))
             .ok();
     }
 
@@ -5322,6 +6064,36 @@ impl ToolCallEventStream {
         let title = title.into();
         let options = context.build_permission_options();
         self.run_authorization_loop(title, options, Some(context), None, cx)
+    }
+
+    /// Always prompts, but still honors deny decisions from tool permission
+    /// settings (`default: deny`, `always_deny` patterns). Allow rules never
+    /// short-circuit the prompt — used for Unleashed tools whose actions must
+    /// stay confirmation-gated (computer use, process kill/service control).
+    pub fn authorize_always_prompt_unless_denied(
+        &self,
+        title: impl Into<String>,
+        context: ToolPermissionContext,
+        cx: &mut App,
+    ) -> Task<Result<()>> {
+        let title = title.into();
+        let options = context.build_permission_options();
+        let tool_name = context.tool_name.clone();
+        let input_values = context.input_values.clone();
+        let check_settings: Box<dyn Fn(&App) -> ToolPermissionDecision> =
+            Box::new(move |cx: &App| {
+                match decide_permission_from_settings(
+                    &tool_name,
+                    &input_values,
+                    agent_settings::AgentSettings::get_global(cx),
+                ) {
+                    ToolPermissionDecision::Deny(reason) => ToolPermissionDecision::Deny(reason),
+                    ToolPermissionDecision::Allow | ToolPermissionDecision::Confirm => {
+                        ToolPermissionDecision::Confirm
+                    }
+                }
+            });
+        self.run_authorization_loop(title, options, Some(context), Some(check_settings), cx)
     }
 
     /// Gate a sandbox *escalation* (network access, per-path writes, or full
@@ -5973,9 +6745,10 @@ impl From<UserMessageContent> for acp::ContentBlock {
     fn from(content: UserMessageContent) -> Self {
         match content {
             UserMessageContent::Text(text) => text.into(),
-            UserMessageContent::Image(image) => {
-                acp::ContentBlock::Image(acp::ImageContent::new(image.source, "image/png"))
-            }
+            UserMessageContent::Image(image) => acp::ContentBlock::Image(acp::ImageContent::new(
+                image.source,
+                image.mime_type.to_string(),
+            )),
             UserMessageContent::Mention { uri, content } => acp::ContentBlock::Resource(
                 acp::EmbeddedResource::new(acp::EmbeddedResourceResource::TextResourceContents(
                     acp::TextResourceContents::new(content, uri.to_uri().to_string()),
@@ -5986,9 +6759,11 @@ impl From<UserMessageContent> for acp::ContentBlock {
 }
 
 fn convert_image(image_content: acp::ImageContent) -> LanguageModelImage {
-    LanguageModelImage {
-        source: image_content.data.into(),
+    let mut image = LanguageModelImage::from_source(image_content.data);
+    if !image_content.mime_type.is_empty() {
+        image.mime_type = image_content.mime_type.into();
     }
+    image
 }
 
 #[cfg(test)]
@@ -6032,6 +6807,427 @@ mod tests {
 
             (thread, event_stream)
         })
+    }
+
+    #[gpui::test]
+    async fn anti_loop_recovers_with_transient_nudge_and_corrected_text(cx: &mut TestAppContext) {
+        let (thread, _) = setup_thread_for_test(cx).await;
+        let model = Arc::new(FakeLanguageModel::with_id_and_thinking(
+            "lmstudio",
+            "local-test",
+            "Local Test",
+            false,
+        ));
+
+        cx.update(|cx| {
+            let mut settings = AgentSettings::get_global(cx).clone();
+            settings.anti_loop = agent_settings::AntiLoopSettings {
+                enabled: true,
+                max_recoveries_per_turn: 1,
+                min_block_chars: 16,
+                max_block_chars: 64,
+                min_repeats: 3,
+                min_text_chars_before_trip: 48,
+                watch_thinking: true,
+                thinking_min_block_chars: 16,
+                thinking_max_block_chars: 64,
+                thinking_min_repeats: 4,
+                thinking_min_text_chars_before_trip: 64,
+            };
+            AgentSettings::override_global(settings, cx);
+
+            thread.update(cx, |thread, cx| {
+                thread.set_model(model.clone(), cx);
+                thread.title = Some("Anti-loop test".into());
+            });
+        });
+
+        let mut events = cx
+            .update(|cx| {
+                thread.update(cx, |thread, cx| {
+                    thread.send(UserMessageId::new(), vec!["Please answer"], cx)
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let first_request = model
+            .pending_completions()
+            .last()
+            .cloned()
+            .expect("expected initial completion");
+        let block = "0123456789ABCDEF";
+        model.send_completion_stream_text_chunk(
+            &first_request,
+            format!("prefix-{block}{}", &block[..8]),
+        );
+        cx.run_until_parked();
+        model.send_completion_stream_text_chunk(&first_request, format!("{}{block}", &block[8..]));
+        cx.run_until_parked();
+
+        let second_request = model
+            .pending_completions()
+            .last()
+            .cloned()
+            .expect("expected recovery completion");
+        assert_ne!(first_request, second_request);
+        let recovery_prompt_count = request_texts_after_system(&second_request.messages)
+            .iter()
+            .filter(|text| text.as_str() == ANTI_LOOP_TEXT_RECOVERY_PROMPT)
+            .count();
+        assert_eq!(recovery_prompt_count, 1);
+
+        model.end_completion_stream(&first_request);
+        model.send_completion_stream_text_chunk(&second_request, "Recovered answer.");
+        model.end_completion_stream(&second_request);
+        cx.run_until_parked();
+
+        let mut replacement = None;
+        let mut began_new_assistant_message = false;
+        while let Some(event) = events.next().await {
+            match event.expect("unexpected thread error") {
+                ThreadEvent::ReplacePendingAgentText(text) => replacement = Some(text),
+                ThreadEvent::BeginNewAssistantMessage => began_new_assistant_message = true,
+                ThreadEvent::Stop(_) => break,
+                _ => {}
+            }
+        }
+        assert_eq!(replacement.as_deref(), Some("prefix-0123456789ABCDEF"));
+        assert!(
+            began_new_assistant_message,
+            "recovery should start a fresh assistant UI message"
+        );
+
+        thread.read_with(cx, |thread, _cx| {
+            assert!(
+                !thread
+                    .to_markdown()
+                    .contains(ANTI_LOOP_TEXT_RECOVERY_PROMPT)
+            );
+            let agent_messages = thread
+                .messages
+                .iter()
+                .filter_map(|message| message.as_agent_message())
+                .collect::<Vec<_>>();
+            assert_eq!(agent_messages.len(), 2);
+            assert_eq!(
+                agent_messages[0].content,
+                vec![AgentMessageContent::Text(
+                    "prefix-0123456789ABCDEF".to_string()
+                )]
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn anti_loop_recovers_from_thinking_loop_and_skips_later_events(cx: &mut TestAppContext) {
+        let (thread, _) = setup_thread_for_test(cx).await;
+        let model = Arc::new(FakeLanguageModel::with_id_and_thinking(
+            "lmstudio",
+            "local-thinking-test",
+            "Local Thinking Test",
+            true,
+        ));
+
+        cx.update(|cx| {
+            let mut settings = AgentSettings::get_global(cx).clone();
+            settings.anti_loop = agent_settings::AntiLoopSettings {
+                enabled: true,
+                max_recoveries_per_turn: 1,
+                min_block_chars: 16,
+                max_block_chars: 64,
+                min_repeats: 3,
+                min_text_chars_before_trip: 48,
+                watch_thinking: true,
+                thinking_min_block_chars: 16,
+                thinking_max_block_chars: 64,
+                thinking_min_repeats: 4,
+                thinking_min_text_chars_before_trip: 64,
+            };
+            AgentSettings::override_global(settings, cx);
+            thread.update(cx, |thread, cx| {
+                thread.set_model(model.clone(), cx);
+                thread.title = Some("Thinking anti-loop test".into());
+            });
+        });
+
+        let mut events = cx
+            .update(|cx| {
+                thread.update(cx, |thread, cx| {
+                    thread.send(UserMessageId::new(), vec!["Please reason and answer"], cx)
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let first_request = model.pending_completions().last().unwrap().clone();
+        let block = "0123456789ABCDEF";
+        // LM Studio maps content before reasoning_content when both occur in
+        // one delta. Keep the detectors independent across that ordering.
+        model.send_completion_stream_text_chunk(&first_request, "trusted prefix");
+        model.send_completion_stream_event(
+            &first_request,
+            LanguageModelCompletionEvent::Thinking {
+                text: format!("prefix-{}", block.repeat(4)),
+                signature: Some("invalid-after-truncate".to_string()),
+            },
+        );
+        model.send_completion_stream_event(
+            &first_request,
+            LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
+                id: LanguageModelToolUseId::from("must-not-run-after-thinking"),
+                name: "must_not_run_after_thinking".into(),
+                raw_input: "{}".to_string(),
+                input: json!({}),
+                is_input_complete: true,
+                thought_signature: None,
+            }),
+        );
+        model.send_completion_stream_text_chunk(&first_request, "untrusted answer");
+        cx.run_until_parked();
+
+        let second_request = model.pending_completions().last().unwrap().clone();
+        assert_ne!(first_request, second_request);
+        let recovery_prompt_count = request_texts_after_system(&second_request.messages)
+            .iter()
+            .filter(|text| text.as_str() == ANTI_LOOP_THINKING_RECOVERY_PROMPT)
+            .count();
+        assert_eq!(recovery_prompt_count, 1);
+
+        model.end_completion_stream(&first_request);
+        model.send_completion_stream_text_chunk(&second_request, "Recovered answer.");
+        model.end_completion_stream(&second_request);
+        cx.run_until_parked();
+
+        let mut thinking_replacement = None;
+        let mut saw_untrusted_text = false;
+        let mut saw_tool_call = false;
+        while let Some(event) = events.next().await {
+            match event.expect("unexpected thread error") {
+                ThreadEvent::ReplacePendingAgentThinking(text) => thinking_replacement = Some(text),
+                ThreadEvent::AgentText(text) if text == "untrusted answer" => {
+                    saw_untrusted_text = true
+                }
+                ThreadEvent::ToolCall(_) => saw_tool_call = true,
+                ThreadEvent::Stop(_) => break,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            thinking_replacement.as_deref(),
+            Some(ANTI_LOOP_THINKING_MARKER)
+        );
+        assert!(!saw_untrusted_text);
+        assert!(!saw_tool_call);
+
+        thread.read_with(cx, |thread, _cx| {
+            assert!(
+                !thread
+                    .to_markdown()
+                    .contains("0123456789ABCDEF0123456789ABCDEF")
+            );
+            let first_agent_message = thread
+                .messages
+                .iter()
+                .filter_map(|message| message.as_agent_message())
+                .next()
+                .expect("expected corrected thinking message");
+            assert_eq!(
+                first_agent_message.content,
+                vec![
+                    AgentMessageContent::Text("trusted prefix".to_string()),
+                    AgentMessageContent::Thinking {
+                        text: ANTI_LOOP_THINKING_MARKER.to_string(),
+                        signature: None,
+                    },
+                ]
+            );
+        });
+    }
+
+    async fn assert_thinking_loop_is_not_watched(
+        provider_id: &str,
+        watch_thinking: bool,
+        cx: &mut TestAppContext,
+    ) {
+        let (thread, _) = setup_thread_for_test(cx).await;
+        let model = Arc::new(FakeLanguageModel::with_id_and_thinking(
+            provider_id,
+            "unwatched-thinking-test",
+            "Unwatched Thinking Test",
+            true,
+        ));
+        cx.update(|cx| {
+            let mut settings = AgentSettings::get_global(cx).clone();
+            settings.anti_loop = agent_settings::AntiLoopSettings {
+                enabled: true,
+                max_recoveries_per_turn: 1,
+                min_block_chars: 16,
+                max_block_chars: 64,
+                min_repeats: 3,
+                min_text_chars_before_trip: 48,
+                watch_thinking,
+                thinking_min_block_chars: 16,
+                thinking_max_block_chars: 64,
+                thinking_min_repeats: 4,
+                thinking_min_text_chars_before_trip: 64,
+            };
+            AgentSettings::override_global(settings, cx);
+            thread.update(cx, |thread, cx| {
+                thread.set_model(model.clone(), cx);
+                thread.title = Some("Unwatched thinking test".into());
+            });
+        });
+
+        let mut events = cx
+            .update(|cx| {
+                thread.update(cx, |thread, cx| {
+                    thread.send(UserMessageId::new(), vec!["Please reason"], cx)
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let request = model.pending_completions().last().unwrap().clone();
+        let looped_thinking = "0123456789ABCDEF".repeat(4);
+        model.send_completion_stream_event(
+            &request,
+            LanguageModelCompletionEvent::Thinking {
+                text: looped_thinking.clone(),
+                signature: None,
+            },
+        );
+        model.end_completion_stream(&request);
+        cx.run_until_parked();
+
+        let mut saw_replacement = false;
+        while let Some(event) = events.next().await {
+            match event.expect("unexpected thread error") {
+                ThreadEvent::ReplacePendingAgentThinking(_) => saw_replacement = true,
+                ThreadEvent::Stop(_) => break,
+                _ => {}
+            }
+        }
+        assert!(!saw_replacement);
+        thread.read_with(cx, |thread, _cx| {
+            assert!(thread.to_markdown().contains(&looped_thinking));
+        });
+    }
+
+    #[gpui::test]
+    async fn anti_loop_respects_disabled_thinking_watch(cx: &mut TestAppContext) {
+        assert_thinking_loop_is_not_watched("lmstudio", false, cx).await;
+    }
+
+    #[gpui::test]
+    async fn anti_loop_does_not_watch_non_lmstudio_thinking(cx: &mut TestAppContext) {
+        assert_thinking_loop_is_not_watched("fake", true, cx).await;
+    }
+
+    #[gpui::test]
+    async fn anti_loop_circuit_breaks_and_skips_later_batch_events(cx: &mut TestAppContext) {
+        let (thread, _) = setup_thread_for_test(cx).await;
+        let model = Arc::new(FakeLanguageModel::with_id_and_thinking(
+            "lmstudio",
+            "local-test",
+            "Local Test",
+            false,
+        ));
+
+        cx.update(|cx| {
+            let mut settings = AgentSettings::get_global(cx).clone();
+            settings.anti_loop = agent_settings::AntiLoopSettings {
+                enabled: true,
+                max_recoveries_per_turn: 1,
+                min_block_chars: 16,
+                max_block_chars: 64,
+                min_repeats: 3,
+                min_text_chars_before_trip: 48,
+                watch_thinking: true,
+                thinking_min_block_chars: 16,
+                thinking_max_block_chars: 64,
+                thinking_min_repeats: 4,
+                thinking_min_text_chars_before_trip: 64,
+            };
+            AgentSettings::override_global(settings, cx);
+            thread.update(cx, |thread, cx| {
+                thread.set_model(model.clone(), cx);
+                thread.title = Some("Circuit-break test".into());
+            });
+        });
+
+        let mut events = cx
+            .update(|cx| {
+                thread.update(cx, |thread, cx| {
+                    thread.send(UserMessageId::new(), vec!["Please answer"], cx)
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let loop_text =
+            "prefix-0123456789ABCDEF".to_string() + "0123456789ABCDEF" + "0123456789ABCDEF";
+        let first_request = model.pending_completions().last().unwrap().clone();
+        model.send_completion_stream_text_chunk(&first_request, loop_text.clone());
+        model.send_completion_stream_event(
+            &first_request,
+            LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
+                id: LanguageModelToolUseId::from("must-not-run"),
+                name: "must_not_run".into(),
+                raw_input: "{}".to_string(),
+                input: json!({}),
+                is_input_complete: true,
+                thought_signature: None,
+            }),
+        );
+        cx.run_until_parked();
+
+        let second_request = model.pending_completions().last().unwrap().clone();
+        assert_ne!(first_request, second_request);
+        model.send_completion_stream_event(
+            &second_request,
+            LanguageModelCompletionEvent::Thinking {
+                text: "0123456789ABCDEF".repeat(4),
+                signature: None,
+            },
+        );
+        cx.run_until_parked();
+
+        assert_eq!(model.pending_completions().len(), 2);
+        model.end_completion_stream(&first_request);
+        model.end_completion_stream(&second_request);
+
+        let mut circuit_break_error = None;
+        let mut saw_tool_call = false;
+        while let Some(event) = events.next().await {
+            match event {
+                Ok(ThreadEvent::ToolCall(_)) => saw_tool_call = true,
+                Err(error) => {
+                    circuit_break_error = Some(error.to_string());
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(!saw_tool_call);
+        assert!(
+            circuit_break_error
+                .as_deref()
+                .is_some_and(|error| error.contains("entered a repetition loop"))
+        );
+        thread.read_with(cx, |thread, _cx| {
+            assert!(thread.messages.iter().all(|message| {
+                message.as_agent_message().is_none_or(|message| {
+                    message.content.iter().all(|content| {
+                        !matches!(
+                            content,
+                            AgentMessageContent::ToolUse(tool_use)
+                                if tool_use.name.as_ref() == "must_not_run"
+                        )
+                    })
+                })
+            }));
+        });
     }
 
     #[test]
@@ -6169,9 +7365,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_compaction_available_for_small_context_window_with_goal(
-        cx: &mut TestAppContext,
-    ) {
+    async fn test_compaction_available_for_small_context_window_with_goal(cx: &mut TestAppContext) {
         use crate::ThreadGoal;
 
         let (thread, _event_stream) = setup_thread_for_test(cx).await;
@@ -6533,7 +7727,13 @@ mod tests {
     fn test_truncate_keeps_fitting_images() {
         let image = LanguageModelImage {
             source: "image".into(),
+            size: language_model::ImageSize {
+                width: 512,
+                height: 512,
+            },
+            mime_type: "image/png".into(),
         };
+        // 512x512 => 255 tokens => 1020 budget-bytes; plus "abc" fits in 1024.
         let message = LanguageModelRequestMessage {
             role: Role::User,
             content: vec![
@@ -6544,7 +7744,7 @@ mod tests {
             reasoning_details: None,
         };
 
-        let truncated = truncate_user_message_to_byte_budget(message, 8).unwrap();
+        let truncated = truncate_user_message_to_byte_budget(message, 1_024).unwrap();
         assert_eq!(
             truncated.content,
             vec![
@@ -6552,6 +7752,85 @@ mod tests {
                 MessageContent::Image(image),
             ]
         );
+    }
+
+    #[test]
+    fn test_image_budget_bytes_uses_token_estimate() {
+        let huge_base64 = LanguageModelImage {
+            source: "A".repeat(2_000_000).into(),
+            size: language_model::ImageSize {
+                width: 1280,
+                height: 720,
+            },
+            mime_type: "image/jpeg".into(),
+        };
+        // Must not treat multi-megabyte base64 as the budget cost.
+        assert_eq!(image_budget_bytes(&huge_base64), 1_105 * 4);
+    }
+
+    #[test]
+    fn test_prune_stale_computer_use_screenshots_keeps_latest_two() {
+        fn screenshot_result(id: &str, label: &str, source: &str) -> LanguageModelRequestMessage {
+            LanguageModelRequestMessage {
+                role: Role::User,
+                content: vec![MessageContent::ToolResult(LanguageModelToolResult {
+                    tool_use_id: LanguageModelToolUseId::from(id),
+                    tool_name: Arc::from(ComputerUseTool::NAME),
+                    is_error: false,
+                    content: vec![
+                        LanguageModelToolResultContent::Text(Arc::from(label)),
+                        LanguageModelToolResultContent::Image(LanguageModelImage {
+                            source: source.into(),
+                            size: language_model::ImageSize {
+                                width: 1280,
+                                height: 720,
+                            },
+                            mime_type: "image/jpeg".into(),
+                        }),
+                    ],
+                    output: None,
+                })],
+                cache: false,
+                reasoning_details: None,
+            }
+        }
+
+        let mut messages = vec![
+            screenshot_result("1", "meta-old", "older"),
+            screenshot_result("2", "meta-mid", "middle"),
+            screenshot_result("3", "meta-new", "newer"),
+        ];
+
+        prune_stale_computer_use_screenshots(&mut messages);
+
+        match &messages[0].content[0] {
+            MessageContent::ToolResult(result) => {
+                assert_eq!(
+                    result.content,
+                    vec![
+                        LanguageModelToolResultContent::Text(Arc::from("meta-old")),
+                        LanguageModelToolResultContent::Text(Arc::from(
+                            "[earlier screenshot omitted]"
+                        )),
+                    ]
+                );
+            }
+            other => panic!("expected tool result, got {other:?}"),
+        }
+        for (ix, source) in [(1, "middle"), (2, "newer")] {
+            match &messages[ix].content[0] {
+                MessageContent::ToolResult(result) => {
+                    assert!(
+                        result.content.iter().any(|part| matches!(
+                            part,
+                            LanguageModelToolResultContent::Image(image) if image.source.as_ref() == source
+                        )),
+                        "expected image {source} retained at index {ix}"
+                    );
+                }
+                other => panic!("expected tool result, got {other:?}"),
+            }
+        }
     }
 
     fn setup_parent_with_subagents(
@@ -6694,9 +7973,7 @@ mod tests {
         let registered_tool_use_id = LanguageModelToolUseId::from("registered_tool_id");
         let missing_tool_use_id = LanguageModelToolUseId::from("missing_tool_id");
         let image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
-        let image = LanguageModelImage {
-            source: image_data.into(),
-        };
+        let image = LanguageModelImage::from_source(image_data);
 
         let mut replay_events = cx.update(|cx| {
             thread.update(cx, |thread, cx| {
@@ -7221,9 +8498,7 @@ mod tests {
 
                 // Two user turns clears the guard, but without usage data the
                 // fullness check still keeps it from rolling over.
-                thread
-                    .messages
-                    .push(agent_text_message("working"));
+                thread.messages.push(agent_text_message("working"));
                 thread
                     .messages
                     .push(user_text_message(UserMessageId::new(), "second"));

@@ -130,7 +130,7 @@ pub fn run(command: Commands) -> anyhow::Result<()> {
 pub static VERSION: LazyLock<String> = LazyLock::new(|| match *RELEASE_CHANNEL {
     ReleaseChannel::Stable | ReleaseChannel::Preview => env!("ZED_PKG_VERSION").to_owned(),
     ReleaseChannel::Nightly | ReleaseChannel::Dev => {
-        let commit_sha = option_env!("ZED_COMMIT_SHA").unwrap_or("missing-zed-commit-sha");
+        let commit_sha = option_env!("ZED_COMMIT_SHA").unwrap_or("missing-LEAD-commit-sha");
         let build_identifier = option_env!("ZED_BUILD_ID");
         if let Some(build_id) = build_identifier {
             format!("{build_id}+{commit_sha}")
@@ -323,7 +323,7 @@ fn handle_crash_files_requests(project: &Entity<HeadlessProject>, client: &AnyPr
                         continue;
                     };
 
-                    if !filename.starts_with("zed") {
+                    if !filename.starts_with("LEAD") {
                         continue;
                     }
 
@@ -553,7 +553,7 @@ pub fn execute_run(
             crashes::InitCrashHandler {
                 session_id: id,
                 zed_version: VERSION.to_owned(),
-                binary: "zed-remote-server".to_string(),
+                binary: "LEAD-remote-server".to_string(),
                 release_channel: release_channel::RELEASE_CHANNEL_NAME.clone(),
                 commit_sha: option_env!("ZED_COMMIT_SHA").unwrap_or("no_sha").to_owned(),
             },
@@ -563,7 +563,7 @@ pub fn execute_run(
                     background_executor.spawn(task).detach();
                 }
             },
-            |pid| paths::temp_dir().join(format!("zed-remote-server-crash-handler-{pid}")),
+            |pid| paths::temp_dir().join(format!("LEAD-remote-server-crash-handler-{pid}")),
             // we are running outside gpui
             #[allow(clippy::disallowed_methods)]
             |duration| FutureExt::map(Timer::after(duration), |_| ()),
@@ -662,7 +662,7 @@ pub fn execute_run(
                     ReqwestClient::proxy_and_user_agent(
                         proxy_url,
                         &format!(
-                            "Zed-Server/{} ({}; {})",
+                            "LEAD-Server/{} ({}; {})",
                             env!("CARGO_PKG_VERSION"),
                             std::env::consts::OS,
                             std::env::consts::ARCH
@@ -832,14 +832,14 @@ pub(crate) fn execute_proxy(
             crashes::InitCrashHandler {
                 session_id: id,
                 zed_version: VERSION.to_owned(),
-                binary: "zed-remote-proxy".to_string(),
+                binary: "LEAD-remote-proxy".to_string(),
                 release_channel: release_channel::RELEASE_CHANNEL_NAME.clone(),
                 commit_sha: option_env!("ZED_COMMIT_SHA").unwrap_or("no_sha").to_owned(),
             },
             |task| {
                 smol::spawn(task).detach();
             },
-            |pid| paths::temp_dir().join(format!("zed-remote-server-proxy-crash-handler-{pid}")),
+            |pid| paths::temp_dir().join(format!("LEAD-remote-server-proxy-crash-handler-{pid}")),
             // we are running outside gpui
             #[allow(clippy::disallowed_methods)]
             |duration| FutureExt::map(Timer::after(duration), |_| ()),
@@ -1295,7 +1295,7 @@ fn read_proxy_settings(cx: &mut Context<HeadlessProject>) -> Option<Url> {
 fn cleanup_old_binaries() -> Result<()> {
     let server_dir = paths::remote_server_dir_relative();
     let release_channel = release_channel::RELEASE_CHANNEL.dev_name();
-    let prefix = format!("zed-remote-server-{}-", release_channel);
+    let prefix = format!("LEAD-remote-server-{}-", release_channel);
 
     for entry in std::fs::read_dir(server_dir.as_std_path())? {
         let path = entry?.path();

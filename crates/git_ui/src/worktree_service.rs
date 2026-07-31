@@ -356,7 +356,7 @@ async fn fetch_remote_for_worktree_base(
 ///
 /// Multiple entries in `git_repos` can be linked worktrees of the *same*
 /// underlying repository (e.g. a project that has both the main checkout and
-/// one of its linked worktrees open as separate Zed worktrees). Those entries
+/// one of its linked worktrees open as separate LEAD worktrees). Those entries
 /// resolve to the same target path via [`Repository::path_for_new_linked_worktree`],
 /// so we create the new worktree only once and remap every contributing
 /// work directory onto it. Without this dedup, the second `git worktree add`
@@ -610,7 +610,7 @@ pub fn handle_create_worktree(
 pub struct CreatedWorktreeWorkspace {
     /// The newly opened workspace.
     pub workspace: Entity<Workspace>,
-    /// True when the project contained more than one Zed worktree backed by
+    /// True when the project contained more than one LEAD worktree backed by
     /// the same underlying git repository, so they were consolidated into a
     /// single new worktree (they resolve to the same target path). Callers
     /// that care — like the `create_thread` agent tool — can use this to warn

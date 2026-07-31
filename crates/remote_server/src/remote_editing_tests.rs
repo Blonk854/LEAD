@@ -1785,7 +1785,7 @@ async fn test_remote_archive_git_operations_are_supported(
 
     cx.update(|cx| {
         repository.update(cx, |repository, _| {
-            repository.update_ref("refs/zed-tests/archive-checkpoint".to_string(), head_sha)
+            repository.update_ref("refs/LEAD-tests/archive-checkpoint".to_string(), head_sha)
         })
     })
     .await
@@ -1796,7 +1796,7 @@ async fn test_remote_archive_git_operations_are_supported(
 
     cx.update(|cx| {
         repository.update(cx, |repository, _| {
-            repository.delete_ref("refs/zed-tests/archive-checkpoint".to_string())
+            repository.delete_ref("refs/LEAD-tests/archive-checkpoint".to_string())
         })
     })
     .await

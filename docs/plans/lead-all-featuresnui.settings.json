@@ -1,0 +1,335 @@
+// LEAD — all new features enabled + full profile set + preferred UI defaults
+// This mirrors what ships in assets/settings/default.json for agent/UI prefs.
+// For Hybrid worker hosts/models, replace PLACEHOLDER_* below (or configure
+// in Settings → Network Agent). Those placeholders are NOT in the install
+// default — only the feature switches and empty workers skeleton are.
+
+{
+  "auto_update": false,
+  "title_bar": {
+    "show_menus": true
+  },
+  "telemetry": {
+    "diagnostics": false,
+    "metrics": false
+  },
+  "icon_theme": "Zed (Default)",
+  "project_panel": {
+    "dock": "left"
+  },
+  "outline_panel": {
+    "dock": "left"
+  },
+  "collaboration_panel": {
+    "dock": "left"
+  },
+  "git_panel": {
+    "dock": "left"
+  },
+  "ui_font_size": 16,
+  "buffer_font_size": 15,
+  "theme": {
+    "mode": "light",
+    "light": "One Light",
+    "dark": "One Dark"
+  },
+
+  "agent": {
+    "enabled": true,
+    "dock": "right",
+    "default_profile": "hybrid",
+    "favorite_models": [],
+    "model_parameters": [],
+
+    "default_model": {
+      "provider": "lmstudio",
+      "model": "PLACEHOLDER_LOCAL_WORKER_MODEL"
+    },
+
+    "network_agent": {
+      "enabled": true,
+      "model": "PLACEHOLDER_ORCHESTRATOR_MODEL",
+      "delegation_mode": "balanced",
+      "workers": {
+        "scheduling": "least_busy",
+        "max_workers": 10,
+        "include_default_model": true,
+        "endpoints": [
+          {
+            "id": "worker-lan-21",
+            "provider": "worker-lan-21",
+            "model": "PLACEHOLDER_MODEL_ON_WORKER_A",
+            "max_concurrent": 1,
+            "enabled": true
+          },
+          {
+            "id": "worker-lan-22",
+            "provider": "worker-lan-22",
+            "model": "PLACEHOLDER_MODEL_ON_WORKER_B",
+            "max_concurrent": 1,
+            "enabled": true
+          },
+          {
+            "id": "worker-lan-23",
+            "provider": "worker-lan-23",
+            "model": "PLACEHOLDER_MODEL_ON_WORKER_C",
+            "max_concurrent": 1,
+            "enabled": false
+          }
+        ]
+      }
+    },
+
+    "full_access": {
+      "enabled": true,
+      "allowed_roots": [],
+      "denied_roots": []
+    },
+
+    "auto_thread_rollover": {
+      "enabled": true,
+      "context_fraction": 0.6
+    },
+
+    "tool_permissions": {
+      "default": "confirm"
+    },
+
+    "profiles": {
+      "local-agent": {
+        "name": "Local Agent",
+        "enable_all_context_servers": false,
+        "tools": {
+          "read_file": true,
+          "grep": true,
+          "list_directory": true,
+          "append_to_journal": true,
+          "read_journal": true,
+          "rag_ingest": true,
+          "rag_search": true,
+          "find_path": true,
+          "edit_file": true,
+          "write_file": true,
+          "terminal": true,
+          "diagnostics": true,
+          "fetch": true,
+          "create_directory": true,
+          "copy_path": true,
+          "move_path": true,
+          "delete_path": true,
+          "update_plan": true,
+          "update_title": true,
+          "skill": true
+        }
+      },
+      "hybrid": {
+        "name": "Hybrid",
+        "enable_all_context_servers": true,
+        "tools": {
+          "append_to_journal": true,
+          "apply_code_action": true,
+          "copy_path": true,
+          "create_directory": true,
+          "create_thread": true,
+          "computer_use": true,
+          "delete_path": true,
+          "diagnostics": true,
+          "edit_file": true,
+          "write_file": true,
+          "fetch": true,
+          "find_path": true,
+          "find_references": true,
+          "get_code_actions": true,
+          "go_to_definition": true,
+          "grep": true,
+          "http_request": true,
+          "list_agents_and_models": true,
+          "list_directory": true,
+          "move_path": true,
+          "process_control": true,
+          "rag_ingest": true,
+          "rag_search": true,
+          "read_file": true,
+          "read_journal": true,
+          "rename_symbol": true,
+          "run_code": true,
+          "skill": true,
+          "spawn_agent": true,
+          "terminal": true,
+          "update_plan": true,
+          "update_title": true,
+          "search_web": true
+        }
+      },
+      "full-access": {
+        "name": "Unleashed",
+        "enable_all_context_servers": true,
+        "tools": {
+          "append_to_journal": true,
+          "apply_code_action": true,
+          "computer_use": true,
+          "copy_path": true,
+          "create_directory": true,
+          "create_thread": true,
+          "delete_path": true,
+          "diagnostics": true,
+          "edit_file": true,
+          "fetch": true,
+          "find_path": true,
+          "find_references": true,
+          "get_code_actions": true,
+          "go_to_definition": true,
+          "grep": true,
+          "http_request": true,
+          "list_agents_and_models": true,
+          "list_directory": true,
+          "move_path": true,
+          "process_control": true,
+          "rag_ingest": true,
+          "rag_search": true,
+          "read_file": true,
+          "read_journal": true,
+          "rename_symbol": true,
+          "run_code": true,
+          "skill": true,
+          "spawn_agent": true,
+          "terminal": true,
+          "update_plan": true,
+          "update_title": true,
+          "search_web": true,
+          "write_file": true
+        }
+      },
+      "write": {
+        "name": "Write",
+        "enable_all_context_servers": true,
+        "tools": {
+          "copy_path": true,
+          "create_directory": true,
+          "create_thread": true,
+          "delete_path": true,
+          "diagnostics": true,
+          "apply_code_action": true,
+          "edit_file": true,
+          "write_file": true,
+          "fetch": true,
+          "find_path": true,
+          "find_references": true,
+          "get_code_actions": true,
+          "go_to_definition": true,
+          "list_agents_and_models": true,
+          "list_directory": true,
+          "move_path": true,
+          "rename_symbol": true,
+          "read_file": true,
+          "grep": true,
+          "skill": true,
+          "spawn_agent": true,
+          "terminal": true,
+          "update_plan": true,
+          "update_title": true,
+          "search_web": true
+        }
+      },
+      "ask": {
+        "name": "Ask",
+        "tools": {
+          "create_thread": true,
+          "diagnostics": true,
+          "fetch": true,
+          "list_agents_and_models": true,
+          "list_directory": true,
+          "find_path": true,
+          "find_references": true,
+          "get_code_actions": true,
+          "go_to_definition": true,
+          "read_file": true,
+          "grep": true,
+          "skill": true,
+          "spawn_agent": true,
+          "update_plan": true,
+          "update_title": true,
+          "search_web": true
+        }
+      },
+      "minimal": {
+        "name": "Minimal",
+        "enable_all_context_servers": false,
+        "tools": {}
+      }
+    }
+  },
+
+  "language_models": {
+    "openai_compatible": {
+      "network-agent": {
+        "api_url": "http://PLACEHOLDER_ORCHESTRATOR_HOST:1234/v1",
+        "available_models": [
+          {
+            "name": "PLACEHOLDER_ORCHESTRATOR_MODEL",
+            "max_tokens": 131072,
+            "max_output_tokens": 16384,
+            "max_completion_tokens": 16384,
+            "capabilities": {
+              "tools": true,
+              "images": false,
+              "parallel_tool_calls": false,
+              "prompt_cache_key": false
+            }
+          }
+        ]
+      },
+      "worker-lan-21": {
+        "api_url": "http://192.168.1.21:1234/v1",
+        "available_models": [
+          {
+            "name": "PLACEHOLDER_MODEL_ON_WORKER_A",
+            "max_tokens": 131072,
+            "max_output_tokens": 16384,
+            "max_completion_tokens": 16384,
+            "capabilities": {
+              "tools": true,
+              "images": false,
+              "parallel_tool_calls": false,
+              "prompt_cache_key": false
+            }
+          }
+        ]
+      },
+      "worker-lan-22": {
+        "api_url": "http://192.168.1.22:1234/v1",
+        "available_models": [
+          {
+            "name": "PLACEHOLDER_MODEL_ON_WORKER_B",
+            "max_tokens": 131072,
+            "max_output_tokens": 16384,
+            "max_completion_tokens": 16384,
+            "capabilities": {
+              "tools": true,
+              "images": false,
+              "parallel_tool_calls": false,
+              "prompt_cache_key": false
+            }
+          }
+        ]
+      },
+      "worker-lan-23": {
+        "api_url": "http://192.168.1.23:1234/v1",
+        "available_models": [
+          {
+            "name": "PLACEHOLDER_MODEL_ON_WORKER_C",
+            "max_tokens": 131072,
+            "max_output_tokens": 16384,
+            "max_completion_tokens": 16384,
+            "capabilities": {
+              "tools": true,
+              "images": false,
+              "parallel_tool_calls": false,
+              "prompt_cache_key": false
+            }
+          }
+        ]
+      }
+    }
+  }
+}

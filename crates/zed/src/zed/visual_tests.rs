@@ -1,9 +1,9 @@
 #![allow(dead_code, unused_imports)]
 
-//! Visual testing infrastructure for Zed.
+//! Visual testing infrastructure for LEAD.
 //!
-//! This module provides utilities for visual regression testing of Zed's UI.
-//! It allows capturing screenshots of the real Zed application window and comparing
+//! This module provides utilities for visual regression testing of LEAD's UI.
+//! It allows capturing screenshots of the real LEAD application window and comparing
 //! them against baseline images.
 //!
 //! ## Important: Main Thread Requirement
@@ -22,10 +22,10 @@
 //! To run visual tests:
 //! ```bash
 //! # Run all visual tests (requires macOS, may need Screen Recording permission)
-//! cargo test -p zed visual_tests -- --ignored --test-threads=1
+//! cargo test -p LEAD visual_tests -- --ignored --test-threads=1
 //!
 //! # Update baselines when UI intentionally changes
-//! UPDATE_BASELINES=1 cargo test -p zed visual_tests -- --ignored --test-threads=1
+//! UPDATE_BASELINES=1 cargo test -p LEAD visual_tests -- --ignored --test-threads=1
 //! ```
 //!
 //! ## Screenshot Output
@@ -43,7 +43,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use workspace::AppState;
 
-/// Initialize a visual test context with all necessary Zed subsystems.
+/// Initialize a visual test context with all necessary LEAD subsystems.
 pub fn init_visual_test(cx: &mut VisualTestAppContext) -> Arc<AppState> {
     cx.update(|cx| {
         env_logger::builder().is_test(true).try_init().ok();
@@ -465,7 +465,7 @@ mod tests {
         cx.run_until_parked();
     }
 
-    /// This test captures a screenshot of an empty Zed workspace.
+    /// This test captures a screenshot of an empty LEAD workspace.
     ///
     /// Note: This test is ignored by default because:
     /// 1. It requires macOS with Screen Recording permission granted

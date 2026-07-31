@@ -1,4 +1,4 @@
-//! Provides constructs for the Zed app version and release channel.
+//! Provides constructs for the LEAD app version and release channel.
 
 #![deny(missing_docs)]
 
@@ -30,14 +30,14 @@ pub static RELEASE_CHANNEL: LazyLock<ReleaseChannel> =
 #[cfg(target_os = "windows")]
 pub fn app_identifier() -> &'static str {
     match *RELEASE_CHANNEL {
-        ReleaseChannel::Dev => "Zed-Editor-Dev",
-        ReleaseChannel::Nightly => "Zed-Editor-Nightly",
-        ReleaseChannel::Preview => "Zed-Editor-Preview",
-        ReleaseChannel::Stable => "Zed-Editor-Stable",
+        ReleaseChannel::Dev => "LEAD-Editor-Dev",
+        ReleaseChannel::Nightly => "LEAD-Editor-Nightly",
+        ReleaseChannel::Preview => "LEAD-Editor-Preview",
+        ReleaseChannel::Stable => "LEAD-Editor-Stable",
     }
 }
 
-/// The Git commit SHA that Zed was built at.
+/// The Git commit SHA that LEAD was built at.
 #[derive(Clone, Eq, Debug, PartialEq)]
 pub struct AppCommitSha(String);
 
@@ -77,7 +77,7 @@ struct GlobalAppVersion(Version);
 
 impl Global for GlobalAppVersion {}
 
-/// The version of Zed.
+/// The version of LEAD.
 pub struct AppVersion;
 
 impl AppVersion {
@@ -120,12 +120,12 @@ impl AppVersion {
     }
 }
 
-/// A Zed release channel.
+/// A LEAD release channel.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub enum ReleaseChannel {
     /// The development release channel.
     ///
-    /// Used for local debug builds of Zed.
+    /// Used for local debug builds of LEAD.
     #[default]
     Dev,
 
@@ -155,7 +155,7 @@ pub fn init_test(app_version: Version, release_channel: ReleaseChannel, cx: &mut
     cx.set_global(GlobalReleaseChannel(release_channel))
 }
 
-/// Returns the Zed docs URL for the current release channel for the given
+/// Returns the LEAD docs URL for the current release channel for the given
 /// `slug`.
 pub fn docs_url(slug: &str, cx: &App) -> String {
     ReleaseChannel::try_global(cx)
@@ -210,13 +210,13 @@ impl ReleaseChannel {
 
     /// Returns the application ID that's used by Wayland as application ID
     /// and WM_CLASS on X11.
-    /// This also has to match the bundle identifier for Zed on macOS.
+    /// This also has to match the bundle identifier for LEAD on macOS.
     pub fn app_id(&self) -> &'static str {
         match self {
             ReleaseChannel::Dev => "dev.lead.LEAD-Dev",
             ReleaseChannel::Nightly => "dev.lead.LEAD-Nightly",
             ReleaseChannel::Preview => "dev.lead.LEAD-Preview",
-            ReleaseChannel::Stable => "dev.lead.LEAD",
+            ReleaseChannel::Stable => "dev.lead.zed",
         }
     }
 
@@ -230,7 +230,7 @@ impl ReleaseChannel {
         }
     }
 
-    /// Returns the Zed docs URL for this [`ReleaseChannel`] for the given
+    /// Returns the LEAD docs URL for this [`ReleaseChannel`] for the given
     /// `slug`.
     pub fn docs_url(&self, slug: &str) -> String {
         let channel_path_segment = match self {

@@ -209,7 +209,7 @@ pub struct AgentSettingsContent {
     /// The global `default` applies when no tool-specific rules match.
     /// For external agent servers (e.g. Claude Agent) that define their own
     /// permission modes, "deny" and "confirm" still take precedence — the
-    /// external agent's permission system is only used when Zed would allow
+    /// external agent's permission system is only used when LEAD would allow
     /// the action. Per-tool regex patterns (`always_allow`, `always_deny`,
     /// `always_confirm`) match against the tool's text input (command, path,
     /// URL, etc.).
@@ -220,6 +220,13 @@ pub struct AgentSettingsContent {
     /// escalation prompt.
     pub sandbox_permissions: Option<SandboxPermissionsContent>,
 
+    /// Guard-railed whole-PC access for native agent tools.
+    ///
+    /// Disabled by default. When enabled, operations outside project
+    /// worktrees still require explicit user authorization unless their
+    /// target is under an allowed root.
+    pub full_access: Option<FullAccessSettingsContent>,
+
     /// Optional "Network Agent" configuration. When enabled, a model served
     /// from a network endpoint drives the main agent (planning and tool calls)
     /// while the local `default_model` handles delegated subagent work.
@@ -228,6 +235,128 @@ pub struct AgentSettingsContent {
     /// Automatically roll a too-long conversation into a fresh thread, seeded
     /// with a robust hand-off summary, to keep the model performing well.
     pub auto_thread_rollover: Option<AutoThreadRolloverContent>,
+
+    /// Detect and recover from repetitive local-model output.
+    pub anti_loop: Option<AntiLoopSettingsContent>,
+
+    /// Local web research (HTML search discovery + hardened fetch).
+    pub web_research: Option<WebResearchSettingsContent>,
+}
+
+/// Configuration for local-model repetition detection and recovery.
+#[with_fallible_options]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq, Default)]
+pub struct AntiLoopSettingsContent {
+    /// Whether repetition detection is enabled.
+    ///
+    /// Default: true
+    pub enabled: Option<bool>,
+    /// Number of automatic recovery attempts before stopping the turn.
+    ///
+    /// Default: 1
+    pub max_recoveries_per_turn: Option<usize>,
+    /// Minimum repeated block length in characters.
+    ///
+    /// Default: 64
+    pub min_block_chars: Option<usize>,
+    /// Maximum repeated block length in characters.
+    ///
+    /// Default: 1024
+    pub max_block_chars: Option<usize>,
+    /// Total contiguous occurrences required to detect a loop.
+    ///
+    /// Default: 3
+    pub min_repeats: Option<usize>,
+    /// Minimum generated text length before detection can trigger.
+    ///
+    /// Default: 256
+    pub min_text_chars_before_trip: Option<usize>,
+    /// Whether plaintext LM Studio reasoning streams are monitored.
+    ///
+    /// Default: true
+    pub watch_thinking: Option<bool>,
+    /// Minimum repeated reasoning block length in characters.
+    ///
+    /// Default: 128
+    pub thinking_min_block_chars: Option<usize>,
+    /// Maximum repeated reasoning block length in characters.
+    ///
+    /// Default: 1024
+    pub thinking_max_block_chars: Option<usize>,
+    /// Total contiguous reasoning-block occurrences required to detect a loop.
+    ///
+    /// Default: 4
+    pub thinking_min_repeats: Option<usize>,
+    /// Minimum reasoning text length before detection can trigger.
+    ///
+    /// Default: 512
+    pub thinking_min_text_chars_before_trip: Option<usize>,
+}
+
+/// Local web research: HTML SERP discovery and hardened page fetch.
+#[with_fallible_options]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq, Default)]
+pub struct WebResearchSettingsContent {
+    /// Whether local web research is enabled.
+    ///
+    /// Default: true
+    pub enabled: Option<bool>,
+    /// Preferred discovery provider: `local`, `cloud`, or `auto`.
+    ///
+    /// Default: local
+    pub preferred_provider: Option<String>,
+    /// Maximum search hits returned to the model.
+    ///
+    /// Default: 5
+    pub max_search_results: Option<usize>,
+    /// Maximum characters per search snippet.
+    ///
+    /// Default: 300
+    pub max_snippet_chars: Option<usize>,
+    /// Maximum characters of fetched page markdown kept for the model.
+    ///
+    /// Default: 12000
+    pub max_fetch_chars: Option<usize>,
+    /// Maximum raw response bytes to download.
+    ///
+    /// Default: 1048576
+    pub max_response_bytes: Option<u64>,
+    /// Maximum redirects to follow while re-checking SSRF on each hop.
+    ///
+    /// Default: 5
+    pub max_redirects: Option<u32>,
+    /// HTTP request timeout in milliseconds.
+    ///
+    /// Default: 15000
+    pub request_timeout_ms: Option<u64>,
+    /// Maximum concurrent research fetches.
+    ///
+    /// Default: 2
+    pub max_concurrency: Option<usize>,
+    /// Minimum delay between requests to the same host, in milliseconds.
+    ///
+    /// Default: 1000
+    pub per_host_delay_ms: Option<u64>,
+    /// Whether isolated browser fallback is enabled (system Edge/Chrome).
+    ///
+    /// Default: false
+    pub browser_fallback_enabled: Option<bool>,
+    /// Timeout for a single isolated browser page render, in seconds.
+    ///
+    /// Default: 45
+    pub browser_timeout_secs: Option<u64>,
+    /// Maximum pages fetched per `research_web` session.
+    ///
+    /// Default: 6
+    pub max_pages: Option<usize>,
+    /// Maximum link-follow depth from each SERP seed in `research_web`.
+    ///
+    /// Default: 1
+    pub max_depth: Option<usize>,
+    /// Wall-clock budget in seconds for a `research_web` session.
+    ///
+    /// Default: 90
+    pub research_wall_clock_secs: Option<u64>,
 }
 
 /// Configuration for automatic thread rollover and hand-off.
@@ -257,6 +386,46 @@ pub struct AutoThreadRolloverContent {
 /// OpenAI-compatible provider under the reserved id `network-agent`.
 #[with_fallible_options]
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq, Default)]
+pub struct NetworkAgentWorkerEndpointContent {
+    /// Stable id for logs and sticky subagent sessions.
+    pub id: Option<String>,
+    /// Provider key under `language_models.openai_compatible` (or another registered provider).
+    pub provider: Option<String>,
+    /// Model id on that provider.
+    pub model: Option<String>,
+    /// Maximum simultaneous subagent turns on this worker.
+    ///
+    /// Default: 1
+    pub max_concurrent: Option<u32>,
+    /// Whether this worker participates in the pool.
+    ///
+    /// Default: true
+    pub enabled: Option<bool>,
+}
+
+/// Hybrid worker pool: multiple networked LM Studio / Ollama endpoints share
+/// subagent load while one orchestrator plans.
+#[with_fallible_options]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq, Default)]
+pub struct NetworkAgentWorkersContent {
+    /// How subagent work is assigned across workers: `pool`, `round_robin`, or
+    /// `least_busy`.
+    ///
+    /// Default: least_busy
+    pub scheduling: Option<String>,
+    /// Maximum number of worker endpoints to use (1–10).
+    ///
+    /// Default: 10
+    pub max_workers: Option<u32>,
+    /// Include `agent.default_model` as a pool member.
+    ///
+    /// Default: true
+    pub include_default_model: Option<bool>,
+    pub endpoints: Option<Vec<NetworkAgentWorkerEndpointContent>>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq, Default)]
 pub struct NetworkAgentSettingsContent {
     /// Whether the Network Agent is currently enabled. When disabled, the
     /// agent uses the local `default_model` for everything.
@@ -266,6 +435,12 @@ pub struct NetworkAgentSettingsContent {
     /// The id of the model (served from the configured network endpoint) to
     /// use as the orchestrating agent model.
     pub model: Option<String>,
+    /// How aggressively the orchestrator delegates heavy work to the local
+    /// worker via `spawn_agent`. `"balanced"` (default) hides execution tools
+    /// from the main thread; `"manual"` leaves tool access unchanged.
+    pub delegation_mode: Option<String>,
+    /// Optional worker pool for hybrid subagent load sharing.
+    pub workers: Option<NetworkAgentWorkersContent>,
 }
 
 impl AgentSettingsContent {
@@ -644,9 +819,27 @@ pub struct SandboxPermissionsContent {
     pub allow_unsandboxed: Option<bool>,
 
     /// Directory subtrees that sandboxed terminal commands may always write
-    /// to without prompting. Paths written by Zed are absolute.
+    /// to without prompting. Paths written by LEAD are absolute.
     /// Default: []
     pub write_paths: Option<ExtendingVec<PathBuf>>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct FullAccessSettingsContent {
+    /// Master switch for native whole-PC tools.
+    /// Default: false
+    pub enabled: Option<bool>,
+
+    /// Additional absolute directory subtrees treated as trusted scope.
+    /// Operations below these roots do not require an escape prompt.
+    /// Default: []
+    pub allowed_roots: Option<ExtendingVec<PathBuf>>,
+
+    /// Absolute directory subtrees that native whole-PC tools may never touch.
+    /// These augment LEAD's built-in catastrophic-path denylist.
+    /// Default: []
+    pub denied_roots: Option<ExtendingVec<PathBuf>>,
 }
 
 #[with_fallible_options]

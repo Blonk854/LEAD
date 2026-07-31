@@ -164,6 +164,46 @@ impl AgentTool for CreateDirectoryTool {
                 return Ok(format!("Created directory {destination_path}"));
             }
 
+            let requested_path = Path::new(&input.path);
+            if requested_path.is_absolute()
+                && cx.update(|cx| crate::full_access_enabled(cx))
+                && !project.read_with(cx, |project, cx| {
+                    project.find_project_path(requested_path, cx).is_some()
+                })
+            {
+                let resolved_path =
+                    crate::canonicalize_for_access(requested_path, fs.as_ref()).await?;
+                if let Some(context) = cx.update(|cx| {
+                    crate::escape_gate(
+                        &project,
+                        std::slice::from_ref(&resolved_path),
+                        Self::NAME,
+                        cx,
+                    )
+                })? {
+                    let authorize = cx.update(|cx| {
+                        event_stream.authorize(
+                            format!(
+                                "Create directory outside project: {}",
+                                resolved_path.display()
+                            ),
+                            context,
+                            cx,
+                        )
+                    });
+                    authorize.await.map_err(|error| error.to_string())?;
+                }
+                futures::select! {
+                    result = fs.create_dir(&resolved_path).fuse() => {
+                        result.map_err(|error| format!("Creating {destination_path}: {error}"))?;
+                    }
+                    _ = event_stream.cancelled_by_user().fuse() => {
+                        return Err("Create directory cancelled by user".into());
+                    }
+                }
+                return Ok(format!("Created directory {destination_path}"));
+            }
+
             let create_entry = project.update(cx, |project, cx| {
                 match project.find_project_path(&input.path, cx) {
                     Some(project_path) => Ok(project.create_entry(project_path, true, cx)),

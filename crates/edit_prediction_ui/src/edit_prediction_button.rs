@@ -373,7 +373,7 @@ impl Render for EditPredictionButton {
                     };
 
                     return div().child(
-                        IconButton::new("zed-predict-pending-button", ep_icon)
+                        IconButton::new("LEAD-predict-pending-button", ep_icon)
                             .shape(IconButtonShape::Square)
                             .indicator(Indicator::dot().color(Color::Muted))
                             .indicator_border_color(Some(cx.theme().colors().status_bar_background))
@@ -428,7 +428,7 @@ impl Render for EditPredictionButton {
                 let provider_unavailable =
                     missing_token || mercury_has_error || zed_cloud_needs_sign_in;
 
-                let icon_button = IconButton::new("zed-predict-pending-button", ep_icon)
+                let icon_button = IconButton::new("LEAD-predict-pending-button", ep_icon)
                     .shape(IconButtonShape::Square)
                     .when_some(indicator_color, |this, color| {
                         this.indicator(Indicator::dot().color(color))
@@ -859,7 +859,7 @@ impl EditPredictionButton {
                                     .child(
                                         Label::new(indoc!{
                                             "Help us improve our open dataset model by sharing data from open source repositories. \
-                                            Zed must detect a license file in your repo for this setting to take effect. \
+                                            LEAD must detect a license file in your repo for this setting to take effect. \
                                             Files with sensitive data and secrets are excluded by default."
                                         })
                                     )
@@ -913,7 +913,7 @@ impl EditPredictionButton {
                 .icon_color(Color::Muted)
                 .documentation_aside(DocumentationSide::Left, |_| {
                     Label::new(indoc!{"
-                        Open your settings to add sensitive paths for which Zed will never predict edits."}).into_any_element()
+                        Open your settings to add sensitive paths for which LEAD will never predict edits."}).into_any_element()
                 })
                 .handler(move |window, cx| {
                     telemetry::event!(
@@ -1208,7 +1208,7 @@ impl EditPredictionButton {
                             },
                             |_window, cx| cx.open_url(&zed_urls::account_url(cx)),
                         )
-                        .entry("Upgrade to Zed Pro or contact us.", None, |_window, cx| {
+                        .entry("Upgrade to LEAD Pro or contact us.", None, |_window, cx| {
                             telemetry::event!(
                                 "Edit Prediction Menu Action",
                                 action = "upsell_clicked",

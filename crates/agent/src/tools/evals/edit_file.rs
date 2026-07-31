@@ -374,6 +374,11 @@ impl EditToolTest {
                 user_agents_md: None,
                 sandboxing: false,
                 active_goal: None,
+                project_memory: None,
+                hybrid_mode: false,
+                local_worker_model: None,
+                balanced_delegation: false,
+                full_access: false,
             };
             let templates = Templates::new();
             template.render(&templates)?
@@ -981,6 +986,7 @@ fn eval_disable_cursor_blinking() {
                         GrepToolInput {
                             regex: "blink".into(),
                             include_pattern: None,
+                            root: None,
                             offset: 0,
                             case_sensitive: false,
                         },
@@ -1064,6 +1070,7 @@ fn eval_from_pixels_constructor() {
                         GrepToolInput {
                             regex: "mod\\s+tests".into(),
                             include_pattern: Some("font-kit/src/canvas.rs".into()),
+                            root: None,
                             offset: 0,
                             case_sensitive: false,
                         },
@@ -1081,6 +1088,7 @@ fn eval_from_pixels_constructor() {
                         GrepToolInput {
                             regex: "mod\\s+tests".into(),
                             include_pattern: Some("font-kit/src/**/*.rs".into()),
+                            root: None,
                             offset: 0,
                             case_sensitive: false,
                         },
@@ -1098,6 +1106,7 @@ fn eval_from_pixels_constructor() {
                         GrepToolInput {
                             regex: "#\\[test\\]".into(),
                             include_pattern: Some("font-kit/src/**/*.rs".into()),
+                            root: None,
                             offset: 0,
                             case_sensitive: false,
                         },

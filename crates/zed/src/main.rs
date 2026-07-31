@@ -38,7 +38,7 @@ use gpui_platform;
 
 use gpui_tokio::Tokio;
 use language::LanguageRegistry;
-use onboarding::{FIRST_OPEN, show_onboarding_view};
+use onboarding::FIRST_OPEN;
 use project_panel::ProjectPanel;
 use prompt_store::PromptBuilder;
 use remote::RemoteConnectionOptions;
@@ -94,7 +94,7 @@ fn build_application() -> Application {
 }
 
 fn files_not_created_on_launch(errors: HashMap<io::ErrorKind, Vec<&Path>>) {
-    let message = "Zed failed to launch";
+    let message = "LEAD failed to launch";
     let error_details = errors
         .into_iter()
         .flat_map(|(kind, paths)| {
@@ -156,7 +156,7 @@ fn fail_to_open_window_async(e: anyhow::Error, cx: &mut AsyncApp) {
 
 fn fail_to_open_window(e: anyhow::Error, _cx: &mut App) {
     eprintln!(
-        "Zed failed to open a window: {e:?}. See https://zed.dev/docs/linux for troubleshooting steps."
+        "LEAD failed to open a window: {e:?}. See https://zed.dev/docs/linux for troubleshooting steps."
     );
     #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     {
@@ -176,7 +176,7 @@ fn fail_to_open_window(e: anyhow::Error, _cx: &mut App) {
             proxy
                 .add_notification(
                     notification_id,
-                    Notification::new("Zed failed to launch")
+                    Notification::new("LEAD failed to launch")
                         .body(Some(
                             format!(
                                 "{e:?}. See https://zed.dev/docs/linux for troubleshooting steps."
@@ -206,14 +206,14 @@ fn main() {
 
     let args = Args::parse();
 
-    // `zed --askpass` Makes zed operate in nc/netcat mode for use with askpass
+    // `LEAD --askpass` Makes LEAD operate in nc/netcat mode for use with askpass
     #[cfg(not(target_os = "windows"))]
     if let Some(socket) = &args.askpass {
         askpass::main(socket);
         return;
     }
 
-    // `zed --crash-handler` Makes zed operate in minidump crash handler mode
+    // `LEAD --crash-handler` Makes LEAD operate in minidump crash handler mode
     if let Some(socket) = &args.crash_handler {
         crashes::crash_server(socket.as_path(), paths::logs_dir().clone());
         return;
@@ -252,7 +252,7 @@ fn main() {
         }
     }
 
-    // `zed --printenv` Outputs environment variables as JSON to stdout
+    // `LEAD --printenv` Outputs environment variables as JSON to stdout
     if args.printenv {
         util::shell_env::print_env();
         return;
@@ -311,7 +311,7 @@ fn main() {
             client::telemetry::os_name(),
             client::telemetry::os_version(),
         );
-        println!("Zed System Specs (from CLI):\n{}", system_specs);
+        println!("LEAD System Specs (from CLI):\n{}", system_specs);
         return;
     }
 
@@ -323,7 +323,7 @@ fn main() {
         .unwrap();
 
     log::info!(
-        "========== starting zed version {}, sha {} ==========",
+        "========== starting LEAD version {}, sha {} ==========",
         app_version,
         app_commit_sha
             .as_ref()
@@ -373,7 +373,7 @@ fn main() {
         }
     };
     if failed_single_instance_check {
-        println!("zed is already running");
+        println!("LEAD is already running");
         return;
     }
 
@@ -408,7 +408,7 @@ fn main() {
                         background_executor1.spawn(task).detach();
                     }
                 },
-                |pid| paths::temp_dir().join(format!("zed-crash-handler-{pid}")),
+                |pid| paths::temp_dir().join(format!("LEAD-crash-handler-{pid}")),
                 move |duration| background_executor.timer(duration),
             )),
         )
@@ -707,7 +707,11 @@ fn main() {
             edit_prediction_ui::init(cx);
             web_search::init(cx);
             web_search_providers::init(app_state.client.clone(), app_state.user_store.clone(), cx);
-            edit_prediction_registry::init(app_state.client.clone(), app_state.user_store.clone(), cx);
+            edit_prediction_registry::init(
+                app_state.client.clone(),
+                app_state.user_store.clone(),
+                cx,
+            );
         }
         snippet_provider::init(cx);
         let prompt_builder = PromptBuilder::load(app_state.fs.clone(), stdout_is_a_pty(), cx);
@@ -1612,7 +1616,7 @@ pub(crate) async fn restore_or_create_workspace(
         // If the user cancelled a failed remote connection at startup,
         // open_remote_project returns Ok but removes the window, so error_count
         // stays 0 and the toast fallback above does not trigger. Without this
-        // check, Zed would exit silently.
+        // check, LEAD would exit silently.
         if cx.update(|cx| cx.windows().is_empty()) {
             cx.update(|cx| {
                 workspace::open_new(
@@ -1633,9 +1637,8 @@ pub(crate) async fn restore_or_create_workspace(
             })
             .await?;
         }
-    } else if matches!(kvp.read_kvp(FIRST_OPEN), Ok(None)) {
-        cx.update(|cx| show_onboarding_view(app_state, cx)).await?;
     } else {
+        let is_first_open = matches!(kvp.read_kvp(FIRST_OPEN), Ok(None));
         cx.update(|cx| {
             workspace::open_new(
                 Default::default(),
@@ -1653,6 +1656,15 @@ pub(crate) async fn restore_or_create_workspace(
             )
         })
         .await?;
+        if is_first_open {
+            cx.update(|cx| {
+                let kvp = KeyValueStore::global(cx);
+                db::write_and_log(cx, move || async move {
+                    kvp.write_kvp(FIRST_OPEN.to_string(), "false".to_string())
+                        .await
+                });
+            });
+        }
     }
 
     Ok(())
@@ -1786,14 +1798,14 @@ struct Args {
     /// Sets a custom directory for all user data (e.g., database, extensions, logs).
     ///
     /// This overrides the default platform-specific data directory location.
-    /// On macOS, the default is `~/Library/Application Support/Zed`.
-    /// On Linux/FreeBSD, the default is `$XDG_DATA_HOME/zed`.
-    /// On Windows, the default is `%LOCALAPPDATA%\Zed`.
+    /// On macOS, the default is `~/Library/Application Support/LEAD`.
+    /// On Linux/FreeBSD, the default is `$XDG_DATA_HOME/LEAD`.
+    /// On Windows, the default is `%LOCALAPPDATA%\LEAD`.
     #[arg(long, value_name = "DIR", verbatim_doc_comment)]
     user_data_dir: Option<String>,
 
     /// The username and WSL distribution to use when opening paths. If not specified,
-    /// Zed will attempt to open the paths directly.
+    /// LEAD will attempt to open the paths directly.
     ///
     /// The username is optional, and if not specified, the default user for the distribution
     /// will be used.
@@ -1812,24 +1824,24 @@ struct Args {
     #[arg(long)]
     dev_container: bool,
 
-    /// Instructs zed to run as a dev server on this machine. (not implemented)
+    /// Instructs LEAD to run as a dev server on this machine. (not implemented)
     #[arg(long)]
     dev_server_token: Option<String>,
 
     /// Prints system specs.
     ///
     /// Useful for submitting issues on GitHub when encountering a bug that
-    /// prevents Zed from starting, so you can't run `zed: copy system specs to
+    /// prevents LEAD from starting, so you can't run `LEAD: copy system specs to
     /// clipboard`
     #[arg(long)]
     system_specs: bool,
 
-    /// Used for recording minidumps on crashes by having Zed run a separate
+    /// Used for recording minidumps on crashes by having LEAD run a separate
     /// process communicating over a socket.
     #[arg(long, hide = true)]
     crash_handler: Option<PathBuf>,
 
-    /// Run zed in the foreground, only used on Windows, to match the behavior on macOS.
+    /// Run LEAD in the foreground, only used on Windows, to match the behavior on macOS.
     #[arg(long)]
     #[cfg(target_os = "windows")]
     #[arg(hide = true)]
@@ -1842,7 +1854,7 @@ struct Args {
     dock_action: Option<usize>,
 
     /// Used for SSH/Git password authentication, to remove the need for netcat as a dependency,
-    /// by having Zed act like netcat communicating over a Unix socket.
+    /// by having LEAD act like netcat communicating over a Unix socket.
     #[arg(long)]
     #[cfg(not(target_os = "windows"))]
     #[arg(hide = true)]
@@ -1860,7 +1872,7 @@ struct Args {
     #[arg(long, hide = true)]
     record_etw_trace: bool,
 
-    /// The PID of the Zed process to trace for heap analysis.
+    /// The PID of the LEAD process to trace for heap analysis.
     #[cfg(target_os = "windows")]
     #[arg(long, hide = true, allow_hyphen_values = true)]
     etw_zed_pid: Option<i64>,
@@ -1870,7 +1882,7 @@ struct Args {
     #[arg(long, hide = true)]
     etw_output: Option<PathBuf>,
 
-    /// Unix socket path for IPC with the parent Zed process.
+    /// Unix socket path for IPC with the parent LEAD process.
     #[cfg(target_os = "windows")]
     #[arg(long, hide = true)]
     etw_socket: Option<String>,
@@ -2004,12 +2016,21 @@ fn watch_themes(fs: Arc<dyn fs::Fs>, cx: &mut App) {
 }
 
 #[cfg(debug_assertions)]
+fn debug_languages_src_path() -> &'static std::path::Path {
+    std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../grammars/src"))
+}
+
+#[cfg(debug_assertions)]
 fn watch_languages(fs: Arc<dyn fs::Fs>, languages: Arc<LanguageRegistry>, cx: &mut App) {
     use std::time::Duration;
 
     cx.background_spawn(async move {
-        let languages_src = Path::new("crates/grammars/src");
-        let Some(languages_src) = fs.canonicalize(languages_src).await.log_err() else {
+        let languages_src = debug_languages_src_path();
+        let Some(languages_src) = fs.canonicalize(languages_src).await.ok() else {
+            log::debug!(
+                "grammar hot-reload disabled: {} not found",
+                languages_src.display()
+            );
             return;
         };
 

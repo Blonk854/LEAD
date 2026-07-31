@@ -619,8 +619,8 @@ pub struct GitExcludeOverride {
 }
 
 impl GitExcludeOverride {
-    const START_BLOCK_MARKER: &str = "\n\n#  ====== Auto-added by Zed: =======\n";
-    const END_BLOCK_MARKER: &str = "\n#  ====== End of auto-added by Zed =======\n";
+    const START_BLOCK_MARKER: &str = "\n\n#  ====== Auto-added by LEAD: =======\n";
+    const END_BLOCK_MARKER: &str = "\n#  ====== End of auto-added by LEAD =======\n";
 
     pub async fn new(git_exclude_path: PathBuf) -> Result<Self> {
         let original_excludes =
@@ -684,7 +684,7 @@ impl GitExcludeOverride {
             }
         }
 
-        // Older versions of Zed didn't have end-of-block markers,
+        // Older versions of LEAD didn't have end-of-block markers,
         // so it's impossible to determine auto-generated lines.
         // Conservatively remove the standard list of excludes
         let standard_excludes = format!(
@@ -3798,9 +3798,9 @@ fn parse_upstream_track(upstream_track: &str) -> Result<UpstreamTracking> {
 
 fn checkpoint_author_envs() -> HashMap<String, String> {
     HashMap::from_iter([
-        ("GIT_AUTHOR_NAME".to_string(), "Zed".to_string()),
+        ("GIT_AUTHOR_NAME".to_string(), "LEAD".to_string()),
         ("GIT_AUTHOR_EMAIL".to_string(), "hi@zed.dev".to_string()),
-        ("GIT_COMMITTER_NAME".to_string(), "Zed".to_string()),
+        ("GIT_COMMITTER_NAME".to_string(), "LEAD".to_string()),
         ("GIT_COMMITTER_EMAIL".to_string(), "hi@zed.dev".to_string()),
     ])
 }
@@ -4643,14 +4643,14 @@ mod tests {
     fn test_branches_parsing() {
         // suppress "help: octal escapes are not supported, `\0` is always null"
         #[allow(clippy::octal_escapes)]
-        let input = "*\0060964da10574cd9bf06463a53bf6e0769c5c45e\0\0refs/heads/zed-patches\0refs/remotes/origin/zed-patches\0\01733187470\0John Doe\0generated protobuf\n";
+        let input = "*\0060964da10574cd9bf06463a53bf6e0769c5c45e\0\0refs/heads/LEAD-patches\0refs/remotes/origin/LEAD-patches\0\01733187470\0John Doe\0generated protobuf\n";
         assert_eq!(
             parse_branch_input(input).unwrap(),
             vec![Branch {
                 is_head: true,
-                ref_name: "refs/heads/zed-patches".into(),
+                ref_name: "refs/heads/LEAD-patches".into(),
                 upstream: Some(Upstream {
-                    ref_name: "refs/remotes/origin/zed-patches".into(),
+                    ref_name: "refs/remotes/origin/LEAD-patches".into(),
                     tracking: UpstreamTracking::Tracked(UpstreamTrackingStatus {
                         ahead: 0,
                         behind: 0
@@ -4685,7 +4685,7 @@ mod tests {
                         sha: "eb0cae33272689bd11030822939dd2701c52f81e".into(),
                         subject: "Add feature".into(),
                         commit_timestamp: 1762948725,
-                        author_name: SharedString::new_static("Zed"),
+                        author_name: SharedString::new_static("LEAD"),
                         has_parent: true,
                     })
                 },
@@ -4697,7 +4697,7 @@ mod tests {
                         sha: "895951d681e5561478c0acdd6905e8aacdfd2249".into(),
                         subject: "Initial commit".into(),
                         commit_timestamp: 1762948695,
-                        author_name: SharedString::new_static("Zed"),
+                        author_name: SharedString::new_static("LEAD"),
                         has_parent: false,
                     })
                 }

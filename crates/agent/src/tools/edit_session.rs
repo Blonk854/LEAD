@@ -175,6 +175,10 @@ impl EditSessionContext {
         )
     }
 
+    pub(crate) fn project(&self) -> &Entity<Project> {
+        &self.project
+    }
+
     fn set_agent_location(&self, buffer: WeakEntity<Buffer>, position: text::Anchor, cx: &mut App) {
         let should_update_agent_location = self
             .thread
@@ -270,6 +274,7 @@ impl EditSessionContext {
 
 pub(crate) enum EditSessionResult {
     Completed(EditSession),
+    External(EditSessionOutput),
     Failed {
         error: String,
         session: Option<EditSession>,
@@ -282,6 +287,7 @@ pub(crate) async fn run_session(
     cx: &mut AsyncApp,
 ) -> Result<EditSessionOutput, EditSessionOutput> {
     match result {
+        EditSessionResult::External(output) => Ok(output),
         EditSessionResult::Completed(session) => {
             session
                 .context

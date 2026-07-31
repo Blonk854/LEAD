@@ -32,6 +32,10 @@ pub struct FindPathToolInput {
     /// You can get back the first two paths by providing a glob of "*thing*.txt"
     /// </example>
     pub glob: String,
+    /// Optional absolute directory to search outside the project. Requires
+    /// guard-railed full PC access and user authorization.
+    #[serde(default)]
+    pub root: Option<PathBuf>,
     /// Optional starting position for paginated results (0-based).
     /// When not provided, starts from the beginning.
     #[serde(default)]
@@ -131,7 +135,39 @@ impl AgentTool for FindPathTool {
                 error: e.to_string(),
             })?;
 
-            let search_paths_task = cx.update(|cx| search_paths(&input.glob, project, cx));
+            let search_paths_task = if let Some(root) = input.root.as_ref() {
+                let fs = project.read_with(cx, |project, _cx| project.fs().clone());
+                let root = crate::canonicalize_for_access(root, fs.as_ref())
+                    .await
+                    .map_err(|error| FindPathToolOutput::Error { error })?;
+                let context = cx
+                    .update(|cx| {
+                        crate::escape_gate(
+                            &project,
+                            std::slice::from_ref(&root),
+                            Self::NAME,
+                            cx,
+                        )
+                    })
+                    .map_err(|error| FindPathToolOutput::Error { error })?;
+                if let Some(context) = context {
+                    let authorize = cx.update(|cx| {
+                        event_stream.authorize(
+                            format!("Find paths outside project: {}", root.display()),
+                            context,
+                            cx,
+                        )
+                    });
+                    authorize
+                        .await
+                        .map_err(|error| FindPathToolOutput::Error {
+                            error: error.to_string(),
+                        })?;
+                }
+                cx.update(|cx| search_external_paths(&input.glob, root, &project, cx))
+            } else {
+                cx.update(|cx| search_paths(&input.glob, project, cx))
+            };
 
             let matches = futures::select! {
                 result = search_paths_task.fuse() => result.map_err(|e| FindPathToolOutput::Error { error: e.to_string() })?,
@@ -173,6 +209,35 @@ impl AgentTool for FindPathTool {
             })
         })
     }
+}
+
+fn search_external_paths(
+    glob: &str,
+    root: PathBuf,
+    project: &Entity<Project>,
+    cx: &mut App,
+) -> Task<Result<Vec<PathBuf>>> {
+    let path_style = project.read(cx).path_style(cx);
+    let matcher = match PathMatcher::new([if glob.is_empty() { "*" } else { glob }], path_style) {
+        Ok(matcher) => matcher,
+        Err(error) => return Task::ready(Err(anyhow!("Invalid glob: {error}"))),
+    };
+    cx.background_spawn(async move {
+        let mut matches = walkdir::WalkDir::new(&root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let relative = entry.path().strip_prefix(&root).ok()?;
+                let relative = util::rel_path::RelPath::new(relative, path_style).ok()?;
+                matcher
+                    .is_match(relative)
+                    .then(|| entry.path().to_path_buf())
+            })
+            .collect::<Vec<_>>();
+        matches.sort();
+        Ok(matches)
+    })
 }
 
 fn search_paths(glob: &str, project: Entity<Project>, cx: &mut App) -> Task<Result<Vec<PathBuf>>> {

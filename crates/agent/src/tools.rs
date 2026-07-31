@@ -1,4 +1,6 @@
 mod apply_code_action_tool;
+mod browse_page_tool;
+mod computer_use_tool;
 mod context_server_registry;
 mod copy_path_tool;
 mod create_directory_tool;
@@ -12,14 +14,20 @@ mod evals;
 mod fetch_tool;
 mod find_path_tool;
 mod find_references_tool;
+mod full_access;
 mod get_code_actions_tool;
 mod go_to_definition_tool;
 mod grep_tool;
+mod http_request_tool;
+mod journal_tool;
 mod list_agents_and_models_tool;
 mod list_directory_tool;
 mod move_path_tool;
+mod process_control_tool;
+mod rag_tool;
 mod read_file_tool;
 mod rename_tool;
+mod run_code_tool;
 mod skill_tool;
 mod spawn_agent_tool;
 mod symbol_locator;
@@ -28,6 +36,7 @@ mod tool_permissions;
 mod update_plan_tool;
 mod update_title_tool;
 mod web_search_tool;
+mod research_web_tool;
 mod write_file_tool;
 
 use crate::AgentTool;
@@ -61,6 +70,8 @@ where
 }
 
 pub use apply_code_action_tool::*;
+pub use browse_page_tool::*;
+pub use computer_use_tool::*;
 pub use context_server_registry::*;
 pub use copy_path_tool::*;
 pub use create_directory_tool::*;
@@ -71,14 +82,21 @@ pub use edit_file_tool::*;
 pub use fetch_tool::*;
 pub use find_path_tool::*;
 pub use find_references_tool::*;
+pub use full_access::*;
 pub use get_code_actions_tool::*;
 pub use go_to_definition_tool::*;
 pub use grep_tool::*;
+pub use http_request_tool::*;
+pub use journal_tool::*;
 pub use list_agents_and_models_tool::*;
 pub use list_directory_tool::*;
 pub use move_path_tool::*;
+pub use process_control_tool::*;
+pub use rag_tool::*;
 pub use read_file_tool::*;
 pub use rename_tool::*;
+pub use research_web_tool::*;
+pub use run_code_tool::*;
 pub use skill_tool::*;
 pub use spawn_agent_tool::*;
 pub use symbol_locator::*;
@@ -167,10 +185,13 @@ macro_rules! tools {
 //    model.
 // 2. `test_all_tools_are_in_tool_info_or_excluded` in
 //    `crates/settings_ui/src/pages/tool_permissions_setup.rs`: every tool must
-//    be in the permission-UI `TOOLS` list (if it calls
-//    `decide_permission_from_settings`) or in `EXCLUDED_TOOLS`.
+//    be in `TOOLS`, `UNLEASHED_TOOLS` (if it uses permission settings), or
+//    `EXCLUDED_TOOLS`.
 tools! {
+    AppendToJournalTool,
     ApplyCodeActionTool,
+    BrowsePageTool,
+    ComputerUseTool,
     CopyPathTool,
     CreateDirectoryTool,
     CreateThreadTool,
@@ -183,16 +204,23 @@ tools! {
     GetCodeActionsTool,
     GoToDefinitionTool,
     GrepTool,
+    HttpRequestTool,
     ListAgentsAndModelsTool,
     ListDirectoryTool,
     MovePathTool,
+    ProcessControlTool,
     ReadFileTool,
+    ReadJournalTool,
+    RagIngestTool,
+    RagSearchTool,
     RenameTool,
+    RunCodeTool,
     SkillTool,
     SpawnAgentTool,
     TerminalTool,
     UpdatePlanTool,
     UpdateTitleTool,
+    ResearchWebTool,
     WebSearchTool,
     WriteFileTool,
 }

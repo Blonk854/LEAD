@@ -866,7 +866,7 @@ impl SkillCreator {
             .child(self.url_editor.clone())
             .child(match &self.url_import_status {
                 UrlImportStatus::Idle => Label::new(
-                    "Paste a GitHub .md URL. Zed will fetch it and fill out the skill form.",
+                    "Paste a GitHub .md URL. LEAD will fetch it and fill out the skill form.",
                 )
                 .size(LabelSize::Small)
                 .color(Color::Muted)
@@ -935,7 +935,7 @@ impl SkillCreator {
         let sep = std::path::MAIN_SEPARATOR;
         let scope_hint: SharedString = match selected.as_ref() {
             Some(ScopeChoice::Global) => SharedString::from(format!(
-                "Available across every Zed project. \
+                "Available across every LEAD project. \
                 Saved to {GLOBAL_SKILLS_DIR_DISPLAY}{sep}\u{2039}name\u{203A}{sep}{SKILL_FILE_NAME}."
             )),
             Some(ScopeChoice::Project { root_name, .. }) => SharedString::from(format!(

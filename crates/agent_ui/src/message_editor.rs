@@ -2309,14 +2309,14 @@ mod tests {
         // name. The empty-scope encoding means a worktree literally
         // named `global` no longer collides with the global source.
         let commands = vec![acp::AvailableCommand::new("help", "Get help")];
-        let skills = vec![make_skill("deploy", ""), make_skill("deploy", "zed")];
+        let skills = vec![make_skill("deploy", ""), make_skill("deploy", "LEAD")];
         let no_skills = Vec::new();
 
         // Bare name still works (current behavior — the resolver
         // applies project-overrides-global for unqualified commands).
         MessageEditor::validate_slash_commands("/deploy", &commands, &skills, &agent_id)
             .expect("bare /deploy should validate when a skill named `deploy` exists");
-        MessageEditor::validate_slash_commands("/zed:deploy", &commands, &no_skills, &agent_id)
+        MessageEditor::validate_slash_commands("/LEAD:deploy", &commands, &no_skills, &agent_id)
             .expect_err("scope-qualified skills should require a first-class available skill");
 
         // Scope-qualified forms both validate, each pointing at the
@@ -2325,8 +2325,8 @@ mod tests {
         // for a project-local skill.
         MessageEditor::validate_slash_commands("/:deploy", &commands, &skills, &agent_id)
             .expect("/:deploy should validate when a global skill named `deploy` exists");
-        MessageEditor::validate_slash_commands("/zed:deploy", &commands, &skills, &agent_id).expect(
-            "/zed:deploy should validate when a project skill named `deploy` exists in the `zed` worktree",
+        MessageEditor::validate_slash_commands("/LEAD:deploy", &commands, &skills, &agent_id).expect(
+            "/LEAD:deploy should validate when a project skill named `deploy` exists in the `LEAD` worktree",
         );
 
         // Hand-typed `/global:<name>` is NOT an alias for `/:<name>`.
@@ -2344,17 +2344,17 @@ mod tests {
             .expect_err("/zed.deploy (dotted) should be treated as an MCP-style prefix and fail");
 
         // Wrong scope is rejected so the resolver doesn't silently
-        // fall through when the user meant a skill. `zed:help` looks
+        // fall through when the user meant a skill. `LEAD:help` looks
         // like a skill scope qualifier but no skill named `help`
-        // exists in the `zed` worktree (it's an MCP command).
+        // exists in the `LEAD` worktree (it's an MCP command).
         let err =
-            MessageEditor::validate_slash_commands("/zed:help", &commands, &skills, &agent_id)
+            MessageEditor::validate_slash_commands("/LEAD:help", &commands, &skills, &agent_id)
                 .expect_err(
-                    "/zed:help should fail — `help` is an MCP command, not a worktree skill",
+                    "/LEAD:help should fail — `help` is an MCP command, not a worktree skill",
                 );
         let err_message = err.to_string();
         assert!(
-            err_message.contains("/zed:help"),
+            err_message.contains("/LEAD:help"),
             "error should mention the typed command: {err_message}"
         );
         // Error listing shows qualified forms for skills so users see
@@ -2365,7 +2365,7 @@ mod tests {
             "error listing should show qualified global form: {err_message}"
         );
         assert!(
-            err_message.contains("/zed:deploy"),
+            err_message.contains("/LEAD:deploy"),
             "error listing should show qualified worktree form: {err_message}"
         );
         assert!(
@@ -5237,8 +5237,8 @@ mod tests {
             .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
             .expect("decode png");
         let file_name = match extension {
-            Some(extension) => format!("zed-agent-ui-test-{}.{}", uuid::Uuid::new_v4(), extension),
-            None => format!("zed-agent-ui-test-{}", uuid::Uuid::new_v4()),
+            Some(extension) => format!("LEAD-agent-ui-test-{}.{}", uuid::Uuid::new_v4(), extension),
+            None => format!("LEAD-agent-ui-test-{}", uuid::Uuid::new_v4()),
         };
         let path = std::env::temp_dir().join(file_name);
         std::fs::write(&path, bytes).expect("write temp png");

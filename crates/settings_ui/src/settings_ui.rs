@@ -675,7 +675,7 @@ pub fn open_settings_editor(
         cx.open_window(
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Zed — Settings".into()),
+                    title: Some("LEAD — Settings".into()),
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(12.0), px(12.0))),
                 }),
@@ -3632,7 +3632,7 @@ impl SettingsWindow {
 
                 let worktree_id = *worktree_id;
 
-                // TODO: move zed::open_local_file() APIs to this crate, and
+                // TODO: move LEAD::open_local_file() APIs to this crate, and
                 // re-implement the "initial_contents" behavior
                 let workspace_weak = corresponding_workspace.downgrade();
                 workspace_window

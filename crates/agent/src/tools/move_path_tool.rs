@@ -200,6 +200,104 @@ impl AgentTool for MovePathTool {
                 authorize.await.map_err(|e| e.to_string())?;
             }
 
+            let has_external_absolute = [&input.source_path, &input.destination_path]
+                .into_iter()
+                .any(|raw| {
+                    let path = Path::new(raw);
+                    path.is_absolute()
+                        && project.read_with(cx, |project, cx| {
+                            project.find_project_path(path, cx).is_none()
+                        })
+                });
+            if has_external_absolute && cx.update(|cx| crate::full_access_enabled(cx)) {
+                let source_path = if Path::new(&input.source_path).is_absolute() {
+                    crate::canonicalize_for_access(
+                        Path::new(&input.source_path),
+                        fs.as_ref(),
+                    )
+                    .await?
+                } else {
+                    project.read_with(cx, |project, cx| {
+                        let project_path = project
+                            .find_project_path(&input.source_path, cx)
+                            .ok_or_else(|| {
+                                format!(
+                                    "Source path {} was not found in the project.",
+                                    input.source_path
+                                )
+                            })?;
+                        project.absolute_path(&project_path, cx).ok_or_else(|| {
+                            format!("Source path {} could not be resolved.", input.source_path)
+                        })
+                    })?
+                };
+                let destination_path = if Path::new(&input.destination_path).is_absolute() {
+                    crate::canonicalize_for_access(
+                        Path::new(&input.destination_path),
+                        fs.as_ref(),
+                    )
+                    .await?
+                } else {
+                    project.read_with(cx, |project, cx| {
+                        let project_path = project
+                            .find_project_path(&input.destination_path, cx)
+                            .ok_or_else(|| {
+                                format!(
+                                    "Destination path {} was not found in the project.",
+                                    input.destination_path
+                                )
+                            })?;
+                        project.absolute_path(&project_path, cx).ok_or_else(|| {
+                            format!(
+                                "Destination path {} could not be resolved.",
+                                input.destination_path
+                            )
+                        })
+                    })?
+                };
+                if let Some(context) = cx.update(|cx| {
+                    crate::escape_gate(
+                        &project,
+                        &[source_path.clone(), destination_path.clone()],
+                        Self::NAME,
+                        cx,
+                    )
+                })? {
+                    let authorize = cx.update(|cx| {
+                        event_stream.authorize(
+                            format!(
+                                "Move outside project: {} to {}",
+                                source_path.display(),
+                                destination_path.display()
+                            ),
+                            context,
+                            cx,
+                        )
+                    });
+                    authorize.await.map_err(|error| error.to_string())?;
+                }
+                futures::select! {
+                    result = fs.rename(
+                        &source_path,
+                        &destination_path,
+                        fs::RenameOptions::default(),
+                    ).fuse() => {
+                        result.map_err(|error| format!(
+                            "Moving {} to {}: {error}",
+                            input.source_path,
+                            input.destination_path
+                        ))?;
+                    }
+                    _ = event_stream.cancelled_by_user().fuse() => {
+                        return Err("Move cancelled by user".into());
+                    }
+                }
+                return Ok(format!(
+                    "Moved {} to {}",
+                    input.source_path, input.destination_path
+                ));
+            }
+
             if global_source_path.is_some() || global_destination_path.is_some() {
                 let source_path = if let Some(global_source_path) = global_source_path {
                     global_source_path

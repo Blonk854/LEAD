@@ -310,17 +310,49 @@ async fn run_terminal_tool(
     let selection = input.selection;
     let sandbox_input = input.sandbox.clone().unwrap_or_default();
 
-    let (working_dir, authorize, sandboxing) = cx.update(|cx| {
-        let working_dir = working_dir(&input.cd, &project, cx).map_err(|err| err.to_string())?;
+    let mut working_dir =
+        cx.update(|cx| working_dir(&input.cd, &project, cx).map_err(|err| err.to_string()))?;
+    if let Some(path) = working_dir.as_ref() {
+        let fs = project.read_with(cx, |project, _cx| project.fs().clone());
+        working_dir = Some(
+            crate::canonicalize_for_access(path, fs.as_ref())
+                .await
+                .map_err(|error| error.to_string())?,
+        );
+    }
+
+    let (authorize, escape_authorize, sandboxing) = cx.update(|cx| {
         let context =
             crate::ToolPermissionContext::new(TerminalTool::NAME, vec![input.command.clone()]);
         let authorize =
             event_stream.authorize(SharedString::new(input.command.clone()), context, cx);
+        let escape_authorize = working_dir
+            .as_ref()
+            .map(|working_dir| {
+                crate::escape_gate(
+                    &project,
+                    std::slice::from_ref(working_dir),
+                    TerminalTool::NAME,
+                    cx,
+                )
+            })
+            .transpose()?
+            .flatten()
+            .map(|context| {
+                event_stream.authorize(
+                    format!("Run command outside project: {}", input.cd),
+                    context,
+                    cx,
+                )
+            });
         let sandboxing = input.sandbox.is_some() && sandboxing_enabled(cx);
-        Result::<_, String>::Ok((working_dir, authorize, sandboxing))
+        Result::<_, String>::Ok((authorize, escape_authorize, sandboxing))
     })?;
 
     authorize.await.map_err(|e| e.to_string())?;
+    if let Some(authorize) = escape_authorize {
+        authorize.await.map_err(|e| e.to_string())?;
+    }
 
     let want_network = sandboxing && sandbox_input.allow_network == Some(true);
     let want_fs_write_all = sandboxing && sandbox_input.allow_fs_write_all == Some(true);
@@ -663,7 +695,11 @@ fn process_content(
     content
 }
 
-fn working_dir(cd: &str, project: &Entity<Project>, cx: &mut App) -> Result<Option<PathBuf>> {
+pub(crate) fn working_dir(
+    cd: &str,
+    project: &Entity<Project>,
+    cx: &mut App,
+) -> Result<Option<PathBuf>> {
     let project = project.read(cx);
 
     if cd == "." || cd.is_empty() {
@@ -687,6 +723,9 @@ fn working_dir(cd: &str, project: &Entity<Project>, cx: &mut App) -> Result<Opti
                 .worktrees(cx)
                 .any(|worktree| input_path.starts_with(&worktree.read(cx).abs_path()))
             {
+                return Ok(Some(input_path.into()));
+            }
+            if crate::full_access_enabled(cx) {
                 return Ok(Some(input_path.into()));
             }
         } else if let Some(worktree) = project.worktree_for_root_name(cd, cx) {

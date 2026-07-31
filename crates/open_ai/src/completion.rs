@@ -1358,9 +1358,7 @@ mod tests {
             content: vec![LanguageModelToolResultContent::Text(Arc::from("Sunny"))],
             output: Some(json!({ "forecast": "Sunny" })),
         };
-        let user_image = LanguageModelImage {
-            source: SharedString::from("aGVsbG8="),
-        };
+        let user_image = LanguageModelImage::from_source(SharedString::from("aGVsbG8="));
         let expected_image_url = user_image.to_base64_url();
 
         let request = LanguageModelRequest {

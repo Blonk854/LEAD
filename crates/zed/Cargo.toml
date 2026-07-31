@@ -1,11 +1,11 @@
 [package]
 description = "The fast, collaborative code editor."
 edition.workspace = true
-name = "zed"
-version = "1.7.0"
+name = "LEAD"
+version = "1.8.1"
 publish.workspace = true
 license = "GPL-3.0-or-later"
-authors = ["Zed Team <hi@zed.dev>"]
+authors = ["LEAD Team <hi@zed.dev>"]
 default-run = "lead"
 
 [lints]
@@ -17,7 +17,7 @@ tracy = ["ztracing/tracy"]
 # Build with `--no-default-features` for a full provider set (still uses paths::LOCAL_ONLY).
 lead-local = []
 default = ["lead-local"]
-# LEAK_BACKTRACE=1 cargo run --features zed/track-project-leak --profile release-fast
+# LEAK_BACKTRACE=1 cargo run --features LEAD/track-project-leak --profile release-fast
 track-project-leak = ["gpui/leak-detection"]
 test-support = [
     "gpui/test-support",

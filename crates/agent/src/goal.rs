@@ -130,7 +130,11 @@ impl ThreadGoal {
 
         format!(
             "Goal status: {:?}\nObjective: {}\nSuccess criteria: {}\n{}\nContinuations: {}{}",
-            self.status, self.objective, self.success_criteria, budget, self.continuation_count,
+            self.status,
+            self.objective,
+            self.success_criteria,
+            budget,
+            self.continuation_count,
             checkpoints
         )
     }

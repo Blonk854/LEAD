@@ -275,6 +275,48 @@ impl AgentTool for ReadFileTool {
                 .await;
             }
 
+            let requested_path = Path::new(&input.path);
+            if requested_path.is_absolute()
+                && cx.update(|cx| crate::full_access_enabled(cx))
+                && !project.read_with(cx, |project, cx| {
+                    project.find_project_path(requested_path, cx).is_some()
+                })
+            {
+                let canonical_path = fs
+                    .canonicalize(requested_path)
+                    .await
+                    .map_err(tool_content_err)?;
+                if let Some(context) = cx
+                    .update(|cx| {
+                        crate::escape_gate(
+                            &project,
+                            std::slice::from_ref(&canonical_path),
+                            Self::NAME,
+                            cx,
+                        )
+                    })
+                    .map_err(tool_content_err)?
+                {
+                    let authorize = cx.update(|cx| {
+                        event_stream.authorize(
+                            format!("Read file outside project: {}", canonical_path.display()),
+                            context,
+                            cx,
+                        )
+                    });
+                    authorize.await.map_err(tool_content_err)?;
+                }
+                return read_global_skill_file(
+                    &canonical_path,
+                    fs.as_ref(),
+                    input.start_line,
+                    input.end_line,
+                    &input.path,
+                    &event_stream,
+                )
+                .await;
+            }
+
             let canonical_roots = canonicalize_worktree_roots(&project, &fs, cx).await;
 
             let (project_path, symlink_canonical_target) =

@@ -4,7 +4,10 @@ use acp_thread::{
     UserMessageId,
 };
 use agent_client_protocol::schema as acp;
-use agent_settings::AgentProfileId;
+use agent_settings::{
+    AgentProfileId, AgentProfileSettings, AgentSettings, NetworkAgentDelegationMode,
+    NetworkAgentSettings, NetworkAgentWorkers,
+};
 use anyhow::Result;
 use client::{Client, RefreshLlmTokenListener, UserStore};
 use collections::IndexMap;
@@ -3054,7 +3057,10 @@ async fn test_truncate_first_message(cx: &mut TestAppContext) {
                 Hello
             "}
         );
-        assert_eq!(thread.latest_token_usage(), None);
+        let usage = thread.latest_token_usage().expect("estimated usage");
+        assert_eq!(usage.max_tokens, 1_000_000);
+        assert!(usage.used_tokens > 0, "expected estimated non-zero usage");
+        assert_eq!(usage.output_tokens, 0);
     });
 
     fake_model.send_last_completion_stream_text_chunk("Hey!");
@@ -3098,7 +3104,16 @@ async fn test_truncate_first_message(cx: &mut TestAppContext) {
     cx.run_until_parked();
     thread.read_with(cx, |thread, _| {
         assert_eq!(thread.to_markdown(), "");
-        assert_eq!(thread.latest_token_usage(), None);
+        assert_eq!(
+            thread.latest_token_usage(),
+            Some(acp_thread::TokenUsage {
+                used_tokens: 0,
+                max_tokens: 1_000_000,
+                max_output_tokens: None,
+                input_tokens: 0,
+                output_tokens: 0,
+            })
+        );
     });
 
     // Ensure we can still send a new message after truncation.
@@ -8068,4 +8083,181 @@ async fn test_mid_turn_model_and_settings_refresh(cx: &mut TestAppContext) {
 
     // Thinking should now be enabled.
     assert!(model_b_completions[0].thinking_allowed);
+}
+
+#[gpui::test]
+async fn test_network_active_subagent_uses_default_model(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/test"), json!({})).await;
+    let project = Project::test(fs, [path!("/test").as_ref()], cx).await;
+    let project_context = cx.new(|_cx| ProjectContext::default());
+    let context_server_store = project.read_with(cx, |project, _| project.context_server_store());
+    let context_server_registry =
+        cx.new(|cx| ContextServerRegistry::new(context_server_store.clone(), cx));
+
+    let network_model = Arc::new(FakeLanguageModel::with_id_and_thinking(
+        AgentSettings::NETWORK_AGENT_PROVIDER_ID,
+        "net-model",
+        "Network Model",
+        false,
+    ));
+    let local_model = Arc::new(FakeLanguageModel::with_id_and_thinking(
+        "lmstudio",
+        "local-model",
+        "Local Model",
+        false,
+    ));
+
+    cx.update(|cx| {
+        LanguageModelRegistry::test(cx);
+        let lm_provider = Arc::new(
+            FakeLanguageModelProvider::new(
+                LanguageModelProviderId::from("lmstudio".to_string()),
+                LanguageModelProviderName::from("LM Studio".to_string()),
+            )
+            .with_models(vec![local_model.clone()]),
+        );
+        let net_provider = Arc::new(
+            FakeLanguageModelProvider::new(
+                LanguageModelProviderId::from(AgentSettings::NETWORK_AGENT_PROVIDER_ID.to_string()),
+                LanguageModelProviderName::from("Network Agent".to_string()),
+            )
+            .with_models(vec![network_model.clone()]),
+        );
+        LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
+            registry.register_provider(lm_provider, cx);
+            registry.register_provider(net_provider, cx);
+        });
+
+        let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+        settings.network_agent = NetworkAgentSettings {
+            enabled: true,
+            model: Some("net-model".into()),
+            delegation_mode: NetworkAgentDelegationMode::Balanced,
+            workers: NetworkAgentWorkers::default(),
+        };
+        settings.default_model = Some(LanguageModelSelection {
+            provider: LanguageModelProviderSetting("lmstudio".into()),
+            model: "local-model".into(),
+            enable_thinking: false,
+            effort: None,
+            speed: None,
+        });
+        agent_settings::AgentSettings::override_global(settings, cx);
+    });
+
+    let parent_thread = cx.new(|cx| {
+        Thread::new(
+            project.clone(),
+            project_context,
+            context_server_registry,
+            Templates::new(),
+            Some(network_model.clone()),
+            cx,
+        )
+    });
+
+    let subagent_thread = cx.new(|cx| Thread::new_subagent(&parent_thread, cx));
+    subagent_thread.read_with(cx, |subagent, _| {
+        assert_eq!(
+            subagent.model().map(|m| m.id().0.to_string()),
+            Some("local-model".to_string())
+        );
+        assert_ne!(
+            subagent.model().map(|m| m.provider_id().0.to_string()),
+            Some(AgentSettings::NETWORK_AGENT_PROVIDER_ID.to_string())
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_balanced_mode_hides_terminal_on_main_thread(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/test"), json!({})).await;
+    let project = Project::test(fs, [path!("/test").as_ref()], cx).await;
+    let project_context = cx.new(|_cx| ProjectContext::default());
+    let context_server_store = project.read_with(cx, |project, _| project.context_server_store());
+    let context_server_registry =
+        cx.new(|cx| ContextServerRegistry::new(context_server_store.clone(), cx));
+    let model = Arc::new(FakeLanguageModel::with_id_and_thinking(
+        AgentSettings::NETWORK_AGENT_PROVIDER_ID,
+        "net-model",
+        "Network Model",
+        false,
+    ));
+
+    cx.update(|cx| {
+        LanguageModelRegistry::test(cx);
+        cx.update_flags(
+            true,
+            vec![
+                "update_plan".to_string(),
+                "update_title".to_string(),
+                "subagents".to_string(),
+            ],
+        );
+        let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+        settings.network_agent = NetworkAgentSettings {
+            enabled: true,
+            model: Some("net-model".into()),
+            delegation_mode: NetworkAgentDelegationMode::Balanced,
+            workers: NetworkAgentWorkers::default(),
+        };
+        let mut tools = IndexMap::default();
+        for name in [
+            TerminalTool::NAME,
+            SpawnAgentTool::NAME,
+            GrepTool::NAME,
+            ReadFileTool::NAME,
+            UpdatePlanTool::NAME,
+        ] {
+            tools.insert(Arc::from(name), true);
+        }
+        settings.profiles.insert(
+            AgentProfileId("hybrid-test".into()),
+            AgentProfileSettings {
+                name: "hybrid-test".into(),
+                tools,
+                enable_all_context_servers: false,
+                context_servers: IndexMap::default(),
+                default_model: None,
+            },
+        );
+        settings.default_profile = AgentProfileId("hybrid-test".into());
+        agent_settings::AgentSettings::override_global(settings, cx);
+    });
+
+    let environment = Rc::new(FakeThreadEnvironment::default());
+    let thread = cx.new(|cx| {
+        let mut thread = Thread::new(
+            project,
+            project_context,
+            context_server_registry,
+            Templates::new(),
+            Some(model),
+            cx,
+        );
+        thread.add_default_tools(environment.clone(), cx);
+        thread
+    });
+
+    thread.read_with(cx, |thread, cx| {
+        let tool_names = thread.enabled_tool_names(cx);
+        assert!(!tool_names.iter().any(|name| name == TerminalTool::NAME));
+        assert!(tool_names.iter().any(|name| name == SpawnAgentTool::NAME));
+    });
+
+    let subagent = cx.new(|cx| {
+        let mut subagent = Thread::new_subagent(&thread, cx);
+        subagent.add_default_tools(environment, cx);
+        subagent
+    });
+    subagent.read_with(cx, |subagent, cx| {
+        let tool_names = subagent.enabled_tool_names(cx);
+        assert!(tool_names.iter().any(|name| name == TerminalTool::NAME));
+    });
 }

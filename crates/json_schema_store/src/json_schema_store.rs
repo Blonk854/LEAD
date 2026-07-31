@@ -511,7 +511,7 @@ pub fn all_schema_file_associations(
             .unwrap()
             .push(serde_json::json!({
                 "fileMatch": [
-                    "zed-inspector-style.json"
+                    "LEAD-inspector-style.json"
                 ],
                 "url": format!("{SCHEMA_URI_PREFIX}zed_inspector_style")
             }));

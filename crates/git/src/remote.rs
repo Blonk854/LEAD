@@ -36,34 +36,34 @@ mod tests {
     fn test_parsing_valid_remote_urls() {
         let valid_urls = vec![
             (
-                "https://github.com/octocat/zed.git",
+                "https://github.com/octocat/LEAD.git",
                 "https",
                 "github.com",
-                "/octocat/zed.git",
+                "/octocat/LEAD.git",
             ),
             (
-                "git@github.com:octocat/zed.git",
+                "git@github.com:octocat/LEAD.git",
                 "ssh",
                 "github.com",
-                "/octocat/zed.git",
+                "/octocat/LEAD.git",
             ),
             (
-                "org-000000@github.com:octocat/zed.git",
+                "org-000000@github.com:octocat/LEAD.git",
                 "ssh",
                 "github.com",
-                "/octocat/zed.git",
+                "/octocat/LEAD.git",
             ),
             (
-                "ssh://git@github.com/octocat/zed.git",
+                "ssh://git@github.com/octocat/LEAD.git",
                 "ssh",
                 "github.com",
-                "/octocat/zed.git",
+                "/octocat/LEAD.git",
             ),
             (
-                "file:///path/to/local/zed",
+                "file:///path/to/local/LEAD",
                 "file",
                 "",
-                "/path/to/local/zed",
+                "/path/to/local/LEAD",
             ),
         ];
 

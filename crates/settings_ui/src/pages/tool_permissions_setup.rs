@@ -16,7 +16,7 @@ use crate::{SettingsWindow, components::SettingsInputField};
 
 const HARDCODED_RULES_DESCRIPTION: &str =
     "`rm -rf` commands are always blocked when run on `$HOME`, `~`, `.`, `..`, or `/`";
-const SETTINGS_DISCLAIMER: &str = "Note: custom tool permissions only apply to the Zed native agent and don’t extend to external agents connected through the Agent Client Protocol (ACP).";
+const SETTINGS_DISCLAIMER: &str = "Note: custom tool permissions only apply to the LEAD native agent and don’t extend to external agents connected through the Agent Client Protocol (ACP).";
 
 /// Tools that support permission rules
 const TOOLS: &[ToolInfo] = &[
@@ -75,18 +75,82 @@ const TOOLS: &[ToolInfo] = &[
         regex_explanation: "Patterns are matched against the search query.",
     },
     ToolInfo {
+        id: "research_web",
+        name: "Web Research",
+        description: "Bounded multi-page web research sessions",
+        regex_explanation: "Patterns are matched against the research query, domains, and session budgets.",
+    },
+    ToolInfo {
         id: "skill",
         name: "Skill",
         description: "Loading agent skill instructions",
         regex_explanation: "Patterns are matched against the absolute path to the skill's SKILL.md file.",
     },
+    ToolInfo {
+        id: "read_file",
+        name: "Read File",
+        description: "Files read outside project worktrees",
+        regex_explanation: "Patterns are matched against the authorized absolute file path.",
+    },
+    ToolInfo {
+        id: "list_directory",
+        name: "List Directory",
+        description: "Directories listed outside project worktrees",
+        regex_explanation: "Patterns are matched against the authorized absolute directory path.",
+    },
+    ToolInfo {
+        id: "find_path",
+        name: "Find Path",
+        description: "Path searches outside project worktrees",
+        regex_explanation: "Patterns are matched against the external search root.",
+    },
+    ToolInfo {
+        id: "grep",
+        name: "Grep",
+        description: "Content searches outside project worktrees",
+        regex_explanation: "Patterns are matched against the external search root.",
+    },
+];
+
+/// Unleashed (whole-PC) tools — configured under Settings → AI → Unleashed.
+pub(crate) const UNLEASHED_TOOLS: &[ToolInfo] = &[
+    ToolInfo {
+        id: "run_code",
+        name: "Run Code",
+        description: "Source code executed by a local interpreter",
+        regex_explanation: "Patterns are matched against the language and source code.",
+    },
+    ToolInfo {
+        id: "http_request",
+        name: "HTTP Request",
+        description: "State-changing HTTP requests",
+        regex_explanation: "Patterns are matched against the target URL. GET requests are read-only and do not prompt.",
+    },
+    ToolInfo {
+        id: "computer_use",
+        name: "Computer Use",
+        description: "Screenshots and mouse/keyboard control",
+        regex_explanation: "Patterns are matched against the action payload JSON. Destructive UI actions always require confirmation even when set to Allow; Deny still blocks the tool.",
+    },
+    ToolInfo {
+        id: "process_control",
+        name: "Process Control",
+        description: "Inspect processes, terminate a process, or manage Windows services",
+        regex_explanation: "Patterns are matched against inputs like `kill:1234` or `service_start:Spooler`. Kill and service start/stop always require confirmation even when set to Allow; Deny still blocks those actions.",
+    },
+    ToolInfo {
+        id: "browse_page",
+        name: "Browse Page",
+        description: "Isolated system browser page rendering for JS-heavy sites",
+        regex_explanation: "Patterns are matched against the URL being browsed. Always confirm unless denied; uses a LEAD-owned browser profile with no personal cookies.",
+    },
 ];
 
 pub(crate) struct ToolInfo {
-    id: &'static str,
-    name: &'static str,
-    description: &'static str,
-    regex_explanation: &'static str,
+    pub(crate) id: &'static str,
+    pub(crate) name: &'static str,
+    pub(crate) description: &'static str,
+    pub(crate) regex_explanation: &'static str,
 }
 
 const fn const_str_eq(a: &str, b: &str) -> bool {
@@ -117,6 +181,17 @@ const fn tool_index(id: &str) -> usize {
         i += 1;
     }
     panic!("tool ID not found in TOOLS array")
+}
+
+const fn unleashed_tool_index(id: &str) -> usize {
+    let mut i = 0;
+    while i < UNLEASHED_TOOLS.len() {
+        if const_str_eq(UNLEASHED_TOOLS[i].id, id) {
+            return i;
+        }
+        i += 1;
+    }
+    panic!("tool ID not found in UNLEASHED_TOOLS array")
 }
 
 /// Parses a string containing backtick-delimited code spans into a `StyledText`
@@ -160,7 +235,9 @@ pub(crate) fn render_tool_permissions_setup_page(
     let tool_items: Vec<AnyElement> = TOOLS
         .iter()
         .enumerate()
-        .map(|(i, tool)| render_tool_list_item(settings_window, tool, i, window, cx))
+        .map(|(i, tool)| {
+            render_tool_list_item(settings_window, tool, i, "Tool Permissions", window, cx)
+        })
         .collect();
 
     let settings = AgentSettings::get_global(cx);
@@ -220,6 +297,7 @@ fn render_tool_list_item(
     _settings_window: &SettingsWindow,
     tool: &'static ToolInfo,
     tool_index: usize,
+    section_header: &'static str,
     _window: &mut Window,
     cx: &mut Context<SettingsWindow>,
 ) -> AnyElement {
@@ -286,7 +364,7 @@ fn render_tool_list_item(
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.push_dynamic_sub_page(
                         tool_name,
-                        "Tool Permissions",
+                        section_header,
                         None,
                         render_fn,
                         window,
@@ -310,7 +388,18 @@ fn get_tool_render_fn(
         "create_directory" => render_create_directory_tool_config,
         "fetch" => render_fetch_tool_config,
         "search_web" => render_web_search_tool_config,
-        _ => render_terminal_tool_config, // fallback
+        "research_web" => render_research_web_tool_config,
+        "skill" => render_skill_tool_config,
+        "read_file" => render_read_file_tool_config,
+        "list_directory" => render_list_directory_tool_config,
+        "find_path" => render_find_path_tool_config,
+        "grep" => render_grep_tool_config,
+        "run_code" => render_run_code_tool_config,
+        "http_request" => render_http_request_tool_config,
+        "computer_use" => render_computer_use_tool_config,
+        "process_control" => render_process_control_tool_config,
+        "browse_page" => render_browse_page_tool_config,
+        _ => render_terminal_tool_config,
     }
 }
 
@@ -364,6 +453,22 @@ pub(crate) fn render_tool_config_page(
         .when(tool.id == TerminalTool::NAME, |this| {
             this.child(render_hardcoded_security_banner(cx))
         })
+        .when(
+            tool.id == "computer_use" || tool.id == "process_control",
+            |this| {
+                this.child(
+                    Banner::new()
+                        .severity(Severity::Info)
+                        .child(
+                            Label::new(
+                                "Destructive actions for this tool always require confirmation. Setting the default to Allow never skips those prompts; setting it to Deny blocks the tool.",
+                            )
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                        ),
+                )
+            },
+        )
         .child(render_verification_section(tool.id, window, cx))
         .when_some(
             settings_window.regex_validation_error.clone(),
@@ -1380,6 +1485,26 @@ macro_rules! tool_config_page_fn {
     };
 }
 
+macro_rules! unleashed_tool_config_page_fn {
+    ($fn_name:ident, $tool_id:literal) => {
+        pub fn $fn_name(
+            settings_window: &SettingsWindow,
+            scroll_handle: &ScrollHandle,
+            window: &mut Window,
+            cx: &mut Context<SettingsWindow>,
+        ) -> AnyElement {
+            const INDEX: usize = unleashed_tool_index($tool_id);
+            render_tool_config_page(
+                &UNLEASHED_TOOLS[INDEX],
+                settings_window,
+                scroll_handle,
+                window,
+                cx,
+            )
+        }
+    };
+}
+
 tool_config_page_fn!(render_terminal_tool_config, "terminal");
 tool_config_page_fn!(render_edit_file_tool_config, "edit_file");
 tool_config_page_fn!(render_write_file_tool_config, "write_file");
@@ -1389,6 +1514,44 @@ tool_config_page_fn!(render_move_path_tool_config, "move_path");
 tool_config_page_fn!(render_create_directory_tool_config, "create_directory");
 tool_config_page_fn!(render_fetch_tool_config, "fetch");
 tool_config_page_fn!(render_web_search_tool_config, "search_web");
+tool_config_page_fn!(render_research_web_tool_config, "research_web");
+tool_config_page_fn!(render_skill_tool_config, "skill");
+tool_config_page_fn!(render_read_file_tool_config, "read_file");
+tool_config_page_fn!(render_list_directory_tool_config, "list_directory");
+tool_config_page_fn!(render_find_path_tool_config, "find_path");
+tool_config_page_fn!(render_grep_tool_config, "grep");
+
+unleashed_tool_config_page_fn!(render_run_code_tool_config, "run_code");
+unleashed_tool_config_page_fn!(render_http_request_tool_config, "http_request");
+unleashed_tool_config_page_fn!(render_computer_use_tool_config, "computer_use");
+unleashed_tool_config_page_fn!(render_process_control_tool_config, "process_control");
+unleashed_tool_config_page_fn!(render_browse_page_tool_config, "browse_page");
+
+/// Renders Unleashed tool permission list items for the Unleashed settings page.
+pub(crate) fn render_unleashed_tool_permission_items(
+    settings_window: &SettingsWindow,
+    window: &mut Window,
+    cx: &mut Context<SettingsWindow>,
+) -> Vec<AnyElement> {
+    UNLEASHED_TOOLS
+        .iter()
+        .enumerate()
+        .flat_map(|(i, tool)| {
+            let mut elements = vec![render_tool_list_item(
+                settings_window,
+                tool,
+                i,
+                "Unleashed",
+                window,
+                cx,
+            )];
+            if i + 1 < UNLEASHED_TOOLS.len() {
+                elements.push(Divider::horizontal().into_any_element());
+            }
+            elements
+        })
+        .collect()
+}
 
 #[cfg(test)]
 mod tests {
@@ -1398,21 +1561,21 @@ mod tests {
     fn test_all_tools_are_in_tool_info_or_excluded() {
         // Tools that intentionally don't appear in the permissions UI.
         // If you add a new tool and this test fails, either:
-        //   1. Add a ToolInfo entry to TOOLS (if the tool has permission checks), or
+        //   1. Add a ToolInfo entry to TOOLS or UNLEASHED_TOOLS, or
         //   2. Add it to this list with a comment explaining why it's excluded.
         const EXCLUDED_TOOLS: &[&str] = &[
             // Read-only / low-risk tools that don't call decide_permission_from_settings
             "apply_code_action",
             "diagnostics",
-            "find_path",
             "find_references",
             "get_code_actions",
             "go_to_definition",
-            "grep",
             "list_agents_and_models",
-            "list_directory",
             "open",
-            "read_file",
+            "read_journal",
+            "append_to_journal",
+            "rag_ingest",
+            "rag_search",
             "rename_symbol",
             "thinking",
             // streaming_edit_file uses "edit_file" for permission lookups,
@@ -1430,23 +1593,26 @@ mod tests {
             "update_title",
         ];
 
-        let tool_info_ids: Vec<&str> = TOOLS.iter().map(|t| t.id).collect();
+        let tool_info_ids: Vec<&str> = TOOLS
+            .iter()
+            .chain(UNLEASHED_TOOLS.iter())
+            .map(|t| t.id)
+            .collect();
 
         for tool_name in agent::ALL_TOOL_NAMES {
             if EXCLUDED_TOOLS.contains(tool_name) {
                 assert!(
                     !tool_info_ids.contains(tool_name),
-                    "Tool '{}' is in both EXCLUDED_TOOLS and TOOLS — pick one.",
+                    "Tool '{}' is in both EXCLUDED_TOOLS and a ToolInfo list — pick one.",
                     tool_name,
                 );
                 continue;
             }
             assert!(
                 tool_info_ids.contains(tool_name),
-                "Tool '{}' is in ALL_TOOL_NAMES but has no entry in TOOLS and \
-                 is not in EXCLUDED_TOOLS. Either add a ToolInfo entry (if the \
-                 tool has permission checks) or add it to EXCLUDED_TOOLS with \
-                 a comment explaining why.",
+                "Tool '{}' is in ALL_TOOL_NAMES but has no ToolInfo entry and \
+                 is not in EXCLUDED_TOOLS. Add it to TOOLS, UNLEASHED_TOOLS, or \
+                 EXCLUDED_TOOLS.",
                 tool_name,
             );
         }
@@ -1454,9 +1620,17 @@ mod tests {
         for tool_id in &tool_info_ids {
             assert!(
                 agent::ALL_TOOL_NAMES.contains(tool_id),
-                "TOOLS contains '{}' but it is not in ALL_TOOL_NAMES. \
+                "ToolInfo list contains '{}' but it is not in ALL_TOOL_NAMES. \
                  Is this a valid built-in tool?",
                 tool_id,
+            );
+        }
+
+        for tool in UNLEASHED_TOOLS {
+            assert!(
+                !TOOLS.iter().any(|t| t.id == tool.id),
+                "Unleashed tool '{}' must not also appear in the general TOOLS list.",
+                tool.id,
             );
         }
     }

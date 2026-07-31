@@ -665,7 +665,7 @@ mod tests {
     async fn test_fuzzy_match(cx: &mut TestAppContext) {
         let models = create_model_list(vec![
             (
-                "zed",
+                "LEAD",
                 vec![
                     "Claude 3.7 Sonnet",
                     "Claude 3.7 Sonnet Thinking",
@@ -684,7 +684,7 @@ mod tests {
         let results = fuzzy_search(models.clone(), "mini".into(), cx.executor()).await;
         assert_models_eq(
             results,
-            vec![("zed", vec!["gpt-5-mini"]), ("openai", vec!["gpt-5-mini"])],
+            vec![("LEAD", vec!["gpt-5-mini"]), ("openai", vec!["gpt-5-mini"])],
         );
 
         // Fuzzy search - test with specific model name
@@ -695,7 +695,7 @@ mod tests {
     #[gpui::test]
     fn test_favorites_section_appears_when_favorites_exist(_cx: &mut TestAppContext) {
         let models = create_model_list(vec![
-            ("zed", vec!["zed/claude", "zed/gemini"]),
+            ("Zed", vec!["zed/claude", "zed/gemini"]),
             ("openai", vec!["openai/gpt-5"]),
         ]);
         let favorites = create_favorites(vec!["zed/gemini"]);
@@ -713,21 +713,21 @@ mod tests {
 
     #[gpui::test]
     fn test_no_favorites_section_when_no_favorites(_cx: &mut TestAppContext) {
-        let models = create_model_list(vec![("zed", vec!["zed/claude", "zed/gemini"])]);
+        let models = create_model_list(vec![("Zed", vec!["zed/claude", "zed/gemini"])]);
         let favorites = create_favorites(vec![]);
 
         let entries = info_list_to_picker_entries(models, &favorites);
 
         assert!(matches!(
             entries.first(),
-            Some(ModelPickerEntry::Separator(s)) if s == "zed"
+            Some(ModelPickerEntry::Separator(s)) if s == "Zed"
         ));
     }
 
     #[gpui::test]
     fn test_models_have_correct_actions(_cx: &mut TestAppContext) {
         let models = create_model_list(vec![
-            ("zed", vec!["zed/claude", "zed/gemini"]),
+            ("Zed", vec!["zed/claude", "zed/gemini"]),
             ("openai", vec!["openai/gpt-5"]),
         ]);
         let favorites = create_favorites(vec!["zed/claude"]);
@@ -748,7 +748,7 @@ mod tests {
     #[gpui::test]
     fn test_favorites_appear_in_both_sections(_cx: &mut TestAppContext) {
         let models = create_model_list(vec![
-            ("zed", vec!["zed/claude", "zed/gemini"]),
+            ("Zed", vec!["zed/claude", "zed/gemini"]),
             ("openai", vec!["openai/gpt-5", "openai/gpt-4"]),
         ]);
         let favorites = create_favorites(vec!["zed/gemini", "openai/gpt-5"]);
@@ -785,7 +785,7 @@ mod tests {
                 "Recommended",
                 "zed/claude",
                 "anthropic/claude",
-                "Zed",
+                "LEAD",
                 "zed/claude",
                 "zed/gpt-5",
                 "Antropic",

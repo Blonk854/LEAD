@@ -4,9 +4,10 @@
 # Use the LM Studio API model id (GET http://localhost:1234/api/v0/models -> "id"),
 # NOT the GGUF filename. Slashes in model ids are OK: lmstudio/google/gemma-4-e4b
 # Skip TTS / non-agent models (e.g. neutts-air) - see SkipModelIds in the ps1 script.
+# Run script with this command: .\script\run-local-tool-eval-matrix.ps1
 ## Tier 1: stress-test weak / non-agentic models (tool-call hardening targets)
 #lmstudio/opus4.7-gods.ghost.codex-4b.gguf
-#qwopus-glm-18b-merged
+#lmstudio/qwopus-glm-18b-merged
 #lmstudio/qwen3.5-9b-uncensored-hauhaucs-aggressive
 #lmstudio/bonsai-8b
 #lmstudio/qwopus3.5-9b-coder
@@ -14,10 +15,15 @@
 #lmstudio/gemma-4-26b-a4b-it-uncensored-heretic
 #lmstudio/qwen3-space.agent.dasd.uncensored-4b
 #lmstudio/google/gemma-4-e4b
+#lmstudio/gemma-4-12b-agentic-fable5-composer2.5-v2-3.5x-tau2-uncensored-heretic
 #
 # Tier 2: common local coder models (replace with models you have loaded)
 # lmstudio/google/gemma-4-12b
 #
 # Tier 3: stronger local models (optional — uncomment when available)
 #lmstudio/google/gemma-4-12b
- lmstudio/qwen/qwen3-14b
+ #lmstudio/qwen/qwen3-14b
+ lmstudio/qwopus3.6-27b-v2-mtp
+ #lmstudio/qwopus3.5-4b-coder-mtp
+ #lmstudio/
+ #lmstudio/

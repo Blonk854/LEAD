@@ -1,0 +1,33 @@
+[package]
+name = "web_research"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/web_research.rs"
+
+[dependencies]
+anyhow.workspace = true
+futures.workspace = true
+html_to_markdown.workspace = true
+http_client.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+url.workspace = true
+which.workspace = true
+smol.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+gpui = { workspace = true, features = ["test-support"] }
+http_client = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
+

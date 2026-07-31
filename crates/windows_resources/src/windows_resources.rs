@@ -51,6 +51,7 @@ pub fn compile(manifest: bool) -> Result<(), Box<dyn std::error::Error>> {
     };
     let icon = std::path::PathBuf::from(ICON_DIR).join(icon_filename);
     let icon_escaped = icon.to_string_lossy().replace('\\', "\\\\");
+    println!("cargo:rerun-if-changed={}", icon.display());
 
     let manifest_line = if manifest {
         let escaped = MANIFEST_PATH.replace('\\', "\\\\");
@@ -94,8 +95,8 @@ BEGIN
             VALUE "FileVersion", "{pkg_version}\0"
             VALUE "ProductName", "{product_name}\0"
             VALUE "ProductVersion", "{product_version}\0"
-            VALUE "CompanyName", "Zed Industries, Inc.\0"
-            VALUE "LegalCopyright", "Copyright 2022 - 2025 Zed Industries, Inc.\0"
+            VALUE "CompanyName", "LEAD\0"
+            VALUE "LegalCopyright", "Copyright 2022 - 2026 LEAD\0"
         END
     END
     BLOCK "VarFileInfo"

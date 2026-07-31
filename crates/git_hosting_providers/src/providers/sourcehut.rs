@@ -142,7 +142,7 @@ mod tests {
             parsed_remote,
             ParsedGitRemote {
                 owner: "zed-industries".into(),
-                repo: "zed".into(),
+                repo: "LEAD".into(),
             }
         );
     }
@@ -172,7 +172,7 @@ mod tests {
             parsed_remote,
             ParsedGitRemote {
                 owner: "zed-industries".into(),
-                repo: "zed".into(),
+                repo: "LEAD".into(),
             }
         );
     }
@@ -190,7 +190,7 @@ mod tests {
             parsed_remote,
             ParsedGitRemote {
                 owner: "zed-industries".into(),
-                repo: "zed".into(),
+                repo: "LEAD".into(),
             }
         );
     }
@@ -226,7 +226,7 @@ mod tests {
             parsed_remote,
             ParsedGitRemote {
                 owner: "zed-industries".into(),
-                repo: "zed".into(),
+                repo: "LEAD".into(),
             }
         );
     }
@@ -236,7 +236,7 @@ mod tests {
         let permalink = SourceHut::public_instance().build_permalink(
             ParsedGitRemote {
                 owner: "zed-industries".into(),
-                repo: "zed".into(),
+                repo: "LEAD".into(),
             },
             BuildPermalinkParams::new(
                 "faa6f979be417239b2e070dbbf6392b909224e0b",
@@ -274,7 +274,7 @@ mod tests {
             .build_permalink(
                 ParsedGitRemote {
                     owner: "zed-industries".into(),
-                    repo: "zed".into(),
+                    repo: "LEAD".into(),
                 },
                 BuildPermalinkParams::new(
                     "faa6f979be417239b2e070dbbf6392b909224e0b",
@@ -312,7 +312,7 @@ mod tests {
         let permalink = SourceHut::public_instance().build_permalink(
             ParsedGitRemote {
                 owner: "zed-industries".into(),
-                repo: "zed".into(),
+                repo: "LEAD".into(),
             },
             BuildPermalinkParams::new(
                 "faa6f979be417239b2e070dbbf6392b909224e0b",
@@ -330,7 +330,7 @@ mod tests {
         let permalink = SourceHut::public_instance().build_permalink(
             ParsedGitRemote {
                 owner: "zed-industries".into(),
-                repo: "zed".into(),
+                repo: "LEAD".into(),
             },
             BuildPermalinkParams::new(
                 "faa6f979be417239b2e070dbbf6392b909224e0b",
@@ -350,7 +350,7 @@ mod tests {
             .build_permalink(
                 ParsedGitRemote {
                     owner: "zed-industries".into(),
-                    repo: "zed".into(),
+                    repo: "LEAD".into(),
                 },
                 BuildPermalinkParams::new(
                     "faa6f979be417239b2e070dbbf6392b909224e0b",
@@ -370,7 +370,7 @@ mod tests {
             .build_permalink(
                 ParsedGitRemote {
                     owner: "zed-industries".into(),
-                    repo: "zed".into(),
+                    repo: "LEAD".into(),
                 },
                 BuildPermalinkParams::new(
                     "faa6f979be417239b2e070dbbf6392b909224e0b",

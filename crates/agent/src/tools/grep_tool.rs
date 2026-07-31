@@ -2,7 +2,7 @@ use crate::{AgentTool, ToolCallEventStream, ToolInput};
 use agent_client_protocol::schema as acp;
 use anyhow::Result;
 use futures::{FutureExt as _, StreamExt};
-use gpui::{App, Entity, SharedString, Task};
+use gpui::{App, AppContext as _, Entity, SharedString, Task};
 use language::{OffsetRangeExt, ParseStatus, Point};
 use project::{
     Project, SearchResults, WorktreeSettings,
@@ -11,7 +11,7 @@ use project::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::Settings;
-use std::{cmp, fmt::Write, sync::Arc};
+use std::{cmp, fmt::Write, path::PathBuf, sync::Arc};
 use util::RangeExt;
 use util::markdown::MarkdownInlineCode;
 use util::paths::PathMatcher;
@@ -48,6 +48,10 @@ pub struct GrepToolInput {
     /// Use "**/*.rs" to search Rust files across all root directories.
     /// </example>
     pub include_pattern: Option<String>,
+    /// Optional absolute directory to search outside the project. Requires
+    /// guard-railed full PC access and user authorization.
+    #[serde(default)]
+    pub root: Option<PathBuf>,
     /// Optional starting position for paginated results (0-based).
     /// When not provided, starts from the beginning.
     #[serde(default)]
@@ -127,6 +131,41 @@ impl AgentTool for GrepTool {
                 .recv()
                 .await
                 .map_err(|e| e.to_string())?;
+
+            if let Some(root) = input.root.as_ref() {
+                let fs = project.read_with(cx, |project, _cx| project.fs().clone());
+                let root = crate::canonicalize_for_access(root, fs.as_ref()).await?;
+                if let Some(context) = cx.update(|cx| {
+                    crate::escape_gate(
+                        &project,
+                        std::slice::from_ref(&root),
+                        Self::NAME,
+                        cx,
+                    )
+                })? {
+                    let authorize = cx.update(|cx| {
+                        event_stream.authorize(
+                            format!("Search files outside project: {}", root.display()),
+                            context,
+                            cx,
+                        )
+                    });
+                    authorize.await.map_err(|error| error.to_string())?;
+                }
+                let search = cx.background_spawn(search_external_files(
+                    root,
+                    input.regex.clone(),
+                    input.include_pattern.clone(),
+                    input.offset,
+                    input.case_sensitive,
+                ));
+                return futures::select! {
+                    result = search.fuse() => result,
+                    _ = event_stream.cancelled_by_user().fuse() => {
+                        Err("Search cancelled by user".into())
+                    }
+                };
+            }
 
             let results = cx.update(|cx| {
                 let path_style = project.read(cx).path_style(cx);
@@ -337,6 +376,90 @@ impl AgentTool for GrepTool {
     }
 }
 
+async fn search_external_files(
+    root: PathBuf,
+    pattern: String,
+    include_pattern: Option<String>,
+    offset: u32,
+    case_sensitive: bool,
+) -> Result<String, String> {
+    const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+    let regex = regex::RegexBuilder::new(&pattern)
+        .case_insensitive(!case_sensitive)
+        .build()
+        .map_err(|error| error.to_string())?;
+    let path_style = if cfg!(windows) {
+        util::paths::PathStyle::Windows
+    } else {
+        util::paths::PathStyle::Posix
+    };
+    let include_matcher = PathMatcher::new(include_pattern.iter(), path_style)
+        .map_err(|error| format!("invalid include glob pattern: {error}"))?;
+
+    let mut skipped = 0u32;
+    let mut found = 0u32;
+    let mut has_more = false;
+    let mut output = String::new();
+    let mut output_path: Option<PathBuf> = None;
+    'files: for entry in walkdir::WalkDir::new(&root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+    {
+        let path = entry.path();
+        let relative = path.strip_prefix(&root).unwrap_or(path);
+        let Ok(relative) = util::rel_path::RelPath::new(relative, path_style) else {
+            continue;
+        };
+        if include_pattern.is_some() && !include_matcher.is_match(relative) {
+            continue;
+        }
+        if entry
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() > MAX_FILE_BYTES)
+        {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for (line_index, line) in text.lines().enumerate() {
+            if !regex.is_match(line) {
+                continue;
+            }
+            if skipped < offset {
+                skipped += 1;
+                continue;
+            }
+            if found >= RESULTS_PER_PAGE {
+                has_more = true;
+                break 'files;
+            }
+            if output_path.as_deref() != Some(path) {
+                writeln!(output, "\n## Matches in {}", path.display()).ok();
+                output_path = Some(path.to_path_buf());
+            }
+            writeln!(output, "L{}: {}", line_index + 1, line).ok();
+            found += 1;
+        }
+    }
+
+    if found == 0 {
+        Ok("No matches found".into())
+    } else if has_more {
+        Ok(format!(
+            "Showing matches {}-{} (more matches exist; use offset: {} for the next page):\n{}",
+            offset + 1,
+            offset + found,
+            offset + RESULTS_PER_PAGE,
+            output
+        ))
+    } else {
+        Ok(format!("Found {found} matches:\n{output}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::ToolCallEventStream;
@@ -377,6 +500,7 @@ mod tests {
         let input = GrepToolInput {
             regex: "println".to_string(),
             include_pattern: Some("root/**/*.rs".to_string()),
+            root: None,
             offset: 0,
             case_sensitive: false,
         };
@@ -396,6 +520,7 @@ mod tests {
         let input = GrepToolInput {
             regex: "fn".to_string(),
             include_pattern: Some("root/**/src/**".to_string()),
+            root: None,
             offset: 0,
             case_sensitive: false,
         };
@@ -418,6 +543,7 @@ mod tests {
         let input = GrepToolInput {
             regex: "fn".to_string(),
             include_pattern: None,
+            root: None,
             offset: 0,
             case_sensitive: false,
         };
@@ -454,6 +580,7 @@ mod tests {
         let input = GrepToolInput {
             regex: "uppercase".to_string(),
             include_pattern: Some("**/*.txt".to_string()),
+            root: None,
             offset: 0,
             case_sensitive: false,
         };
@@ -468,6 +595,7 @@ mod tests {
         let input = GrepToolInput {
             regex: "uppercase".to_string(),
             include_pattern: Some("**/*.txt".to_string()),
+            root: None,
             offset: 0,
             case_sensitive: true,
         };
@@ -482,6 +610,7 @@ mod tests {
         let input = GrepToolInput {
             regex: "LOWERCASE".to_string(),
             include_pattern: Some("**/*.txt".to_string()),
+            root: None,
             offset: 0,
             case_sensitive: true,
         };
@@ -497,6 +626,7 @@ mod tests {
         let input = GrepToolInput {
             regex: "lowercase".to_string(),
             include_pattern: Some("**/*.txt".to_string()),
+            root: None,
             offset: 0,
             case_sensitive: true,
         };
@@ -598,6 +728,7 @@ mod tests {
         let input = GrepToolInput {
             regex: "This is at the top level".to_string(),
             include_pattern: Some("**/*.rs".to_string()),
+            root: None,
             offset: 0,
             case_sensitive: false,
         };
@@ -627,6 +758,7 @@ mod tests {
         let input = GrepToolInput {
             regex: "Function in nested module".to_string(),
             include_pattern: Some("**/*.rs".to_string()),
+            root: None,
             offset: 0,
             case_sensitive: false,
         };
@@ -658,6 +790,7 @@ mod tests {
         let input = GrepToolInput {
             regex: "second_arg".to_string(),
             include_pattern: Some("**/*.rs".to_string()),
+            root: None,
             offset: 0,
             case_sensitive: false,
         };
@@ -693,6 +826,7 @@ mod tests {
         let input = GrepToolInput {
             regex: "Inside if block".to_string(),
             include_pattern: Some("**/*.rs".to_string()),
+            root: None,
             offset: 0,
             case_sensitive: false,
         };
@@ -723,6 +857,7 @@ mod tests {
         let input = GrepToolInput {
             regex: "Line 5".to_string(),
             include_pattern: Some("**/*.rs".to_string()),
+            root: None,
             offset: 0,
             case_sensitive: false,
         };
@@ -763,6 +898,7 @@ mod tests {
         let input = GrepToolInput {
             regex: "Line 12".to_string(),
             include_pattern: Some("**/*.rs".to_string()),
+            root: None,
             offset: 0,
             case_sensitive: false,
         };
@@ -876,6 +1012,7 @@ mod tests {
             GrepToolInput {
                 regex: "outside_function".to_string(),
                 include_pattern: None,
+                root: None,
                 offset: 0,
                 case_sensitive: false,
             },
@@ -894,6 +1031,7 @@ mod tests {
             GrepToolInput {
                 regex: "main".to_string(),
                 include_pattern: None,
+                root: None,
                 offset: 0,
                 case_sensitive: false,
             },
@@ -912,6 +1050,7 @@ mod tests {
             GrepToolInput {
                 regex: "special_configuration".to_string(),
                 include_pattern: None,
+                root: None,
                 offset: 0,
                 case_sensitive: false,
             },
@@ -929,6 +1068,7 @@ mod tests {
             GrepToolInput {
                 regex: "custom_metadata".to_string(),
                 include_pattern: None,
+                root: None,
                 offset: 0,
                 case_sensitive: false,
             },
@@ -947,6 +1087,7 @@ mod tests {
             GrepToolInput {
                 regex: "SECRET_KEY".to_string(),
                 include_pattern: None,
+                root: None,
                 offset: 0,
                 case_sensitive: false,
             },
@@ -964,6 +1105,7 @@ mod tests {
             GrepToolInput {
                 regex: "private_key_content".to_string(),
                 include_pattern: None,
+                root: None,
                 offset: 0,
                 case_sensitive: false,
             },
@@ -982,6 +1124,7 @@ mod tests {
             GrepToolInput {
                 regex: "sensitive_data".to_string(),
                 include_pattern: None,
+                root: None,
                 offset: 0,
                 case_sensitive: false,
             },
@@ -1000,6 +1143,7 @@ mod tests {
             GrepToolInput {
                 regex: "normal_file_content".to_string(),
                 include_pattern: None,
+                root: None,
                 offset: 0,
                 case_sensitive: false,
             },
@@ -1018,6 +1162,7 @@ mod tests {
             GrepToolInput {
                 regex: "outside_function".to_string(),
                 include_pattern: Some("../outside_project/**/*.rs".to_string()),
+                root: None,
                 offset: 0,
                 case_sensitive: false,
             },
@@ -1111,6 +1256,7 @@ mod tests {
             GrepToolInput {
                 regex: "secret".to_string(),
                 include_pattern: None,
+                root: None,
                 offset: 0,
                 case_sensitive: false,
             },
@@ -1165,6 +1311,7 @@ mod tests {
             GrepToolInput {
                 regex: "secret".to_string(),
                 include_pattern: Some("worktree1/**/*.rs".to_string()),
+                root: None,
                 offset: 0,
                 case_sensitive: false,
             },

@@ -225,3 +225,7 @@
   - [Glossary](./development/glossary.md)
 - [Release Notes](./development/release-notes.md)
 - [Debugging Crashes](./development/debugging-crashes.md)
+
+# LEAD Releases
+
+- [1.8.0 (dev)](./releases/1.8.0.md)

@@ -17,7 +17,7 @@ const ANTHROPIC_SIZE_LIMIT: f32 = 1568.;
 
 /// Default per-image hard limit (in bytes) for the encoded image payload we send upstream.
 ///
-/// NOTE: `LanguageModelImage.source` is base64-encoded PNG bytes (without the `data:` prefix).
+/// NOTE: `LanguageModelImage.source` is base64-encoded image bytes (without the `data:` prefix).
 /// This limit is enforced on the encoded PNG bytes *before* base64 encoding.
 const DEFAULT_IMAGE_MAX_BYTES: usize = 5 * 1024 * 1024;
 
@@ -132,8 +132,14 @@ fn language_model_image_from_dynamic_image(
     // SAFETY: The base64 encoder should not produce non-UTF8.
     let source = unsafe { String::from_utf8_unchecked(base64_image) };
 
+    let (width, height) = processed_image.dimensions();
     Ok(Some(LanguageModelImage {
         source: source.into(),
+        size: ImageSize {
+            width: width as i32,
+            height: height as i32,
+        },
+        mime_type: "image/png".into(),
     }))
 }
 

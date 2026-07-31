@@ -994,7 +994,7 @@ pub struct CreateThreadOptions {
     /// Agent to use. Defaults to the panel's selected agent.
     pub agent: Option<Agent>,
     /// Model override, as `provider/model-id`. Only applied when the thread
-    /// uses the native Zed agent.
+    /// uses the native LEAD agent.
     pub model: Option<String>,
     /// Working directories to attach to the new thread (e.g., the path of a
     /// freshly-created sibling worktree). When `None`, the thread inherits
@@ -3409,6 +3409,10 @@ impl AgentPanel {
                 }
             };
 
+            source_thread.update(cx, |thread, cx| {
+                agent::persist_summary_to_worktrees(thread.project(), &summary, cx);
+            });
+
             this.update_in(cx, |this, window, cx| {
                 let header = if goal_active {
                     "Continuing automated work in a fresh thread to keep the model performing \
@@ -3422,6 +3426,11 @@ impl AgentPanel {
                     body.push_str(
                         "\n\nResume working toward the goal from where the previous thread left \
                          off. Do not stop until the success criteria are verified.",
+                    );
+                } else {
+                    body.push_str(
+                        "\n\nResume from where the previous thread left off using the hand-off \
+                         and project memory. Verify current files before editing.",
                     );
                 }
 
@@ -3453,15 +3462,11 @@ impl AgentPanel {
                     }
                 }
 
-                // For goal-driven work, resume automatically now that the goal
-                // is attached. Non-goal rollovers leave the summary seeded for
-                // the user to continue.
-                if goal_active {
-                    if let Some(thread_view) = view.read(cx).root_thread_view() {
-                        thread_view.update(cx, |thread_view, cx| {
-                            thread_view.send(window, cx);
-                        });
-                    }
+                // Auto-continue in the fresh thread now that any carried-over goal is attached.
+                if let Some(thread_view) = view.read(cx).root_thread_view() {
+                    thread_view.update(cx, |thread_view, cx| {
+                        thread_view.send(window, cx);
+                    });
                 }
             })
             .ok();
@@ -5041,7 +5046,7 @@ impl agent::SiblingThreadHost for AgentPanelSiblingHost {
 
         let mut agents = Vec::new();
 
-        // Native Zed agent — always available, and we can enumerate models
+        // Native LEAD agent — always available, and we can enumerate models
         // directly from the language model registry.
         let native_models = {
             let registry = LanguageModelRegistry::read_global(cx);
@@ -5993,7 +5998,7 @@ impl AgentPanel {
                             }
                         })
                         .item(
-                            ContextMenuEntry::new("Zed Agent")
+                            ContextMenuEntry::new(agent::NATIVE_AGENT_DISPLAY_NAME)
                                 .when(
                                     !showing_terminal && is_agent_selected(Agent::NativeAgent),
                                     |this| this.action(Box::new(NewThread)),
@@ -7042,7 +7047,10 @@ mod tests {
 
     #[test]
     fn test_rollover_thread_title() {
-        assert_eq!(rollover_thread_title("Fix login bug"), "Fix login bug (cont.)");
+        assert_eq!(
+            rollover_thread_title("Fix login bug"),
+            "Fix login bug (cont.)"
+        );
         assert_eq!(
             rollover_thread_title("Fix login bug (cont.)"),
             "Fix login bug (cont. 2)"
@@ -8364,7 +8372,7 @@ mod tests {
         );
         assert!(
             uri.starts_with("zed:///agent/merge-conflict"),
-            "URI should use the zed merge-conflict scheme, got: {uri}"
+            "URI should use the LEAD merge-conflict scheme, got: {uri}"
         );
         assert!(uri.contains("utils.rs"), "URI should encode the file path");
     }

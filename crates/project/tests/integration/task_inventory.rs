@@ -446,7 +446,7 @@ async fn test_inventory_static_task_filters(cx: &mut TestAppContext) {
             TaskSourceKind::Worktree {
                 id: worktree_1,
                 directory_in_worktree: rel_path(".zed").into(),
-                id_base: "local worktree tasks from directory \".zed\"".into(),
+                id_base: "local worktree tasks from directory \".LEAD\"".into(),
             },
             common_name.to_string(),
         ),
@@ -454,7 +454,7 @@ async fn test_inventory_static_task_filters(cx: &mut TestAppContext) {
             TaskSourceKind::Worktree {
                 id: worktree_1,
                 directory_in_worktree: rel_path(".zed").into(),
-                id_base: "local worktree tasks from directory \".zed\"".into(),
+                id_base: "local worktree tasks from directory \".LEAD\"".into(),
             },
             "worktree_1".to_string(),
         ),
@@ -464,7 +464,7 @@ async fn test_inventory_static_task_filters(cx: &mut TestAppContext) {
             TaskSourceKind::Worktree {
                 id: worktree_2,
                 directory_in_worktree: rel_path(".zed").into(),
-                id_base: "local worktree tasks from directory \".zed\"".into(),
+                id_base: "local worktree tasks from directory \".LEAD\"".into(),
             },
             common_name.to_string(),
         ),
@@ -472,7 +472,7 @@ async fn test_inventory_static_task_filters(cx: &mut TestAppContext) {
             TaskSourceKind::Worktree {
                 id: worktree_2,
                 directory_in_worktree: rel_path(".zed").into(),
-                id_base: "local worktree tasks from directory \".zed\"".into(),
+                id_base: "local worktree tasks from directory \".LEAD\"".into(),
             },
             "worktree_2".to_string(),
         ),
@@ -597,14 +597,14 @@ async fn test_zed_tasks_take_precedence_over_vscode(cx: &mut TestAppContext) {
     assert_eq!(
         task_template_names(&inventory, Some(worktree_id), cx).await,
         vec!["zed_task"],
-        "With both .zed and .vscode tasks, only .zed tasks should appear"
+        "With both .LEAD and .vscode tasks, only .LEAD tasks should appear"
     );
 
     register_worktree_task_used(&inventory, worktree_id, "zed_task", cx).await;
     let resolved = resolved_task_names(&inventory, Some(worktree_id), cx).await;
     assert!(
         !resolved.iter().any(|name| name == "vscode_task"),
-        "Previously used .vscode tasks should not appear when .zed tasks exist, got: {resolved:?}"
+        "Previously used .vscode tasks should not appear when .LEAD tasks exist, got: {resolved:?}"
     );
 }
 

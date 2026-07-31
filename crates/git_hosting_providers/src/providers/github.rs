@@ -319,7 +319,7 @@ mod tests {
             parsed_remote,
             ParsedGitRemote {
                 owner: "zed-industries".into(),
-                repo: "zed".into(),
+                repo: "LEAD".into(),
             }
         );
     }
@@ -369,7 +369,7 @@ mod tests {
             parsed_remote,
             ParsedGitRemote {
                 owner: "zed-industries".into(),
-                repo: "zed".into(),
+                repo: "LEAD".into(),
             }
         );
     }
@@ -386,7 +386,7 @@ mod tests {
             parsed_remote,
             ParsedGitRemote {
                 owner: "zed-industries".into(),
-                repo: "zed".into(),
+                repo: "LEAD".into(),
             }
         );
     }
@@ -401,7 +401,7 @@ mod tests {
             parsed_remote,
             ParsedGitRemote {
                 owner: "zed-industries".into(),
-                repo: "zed".into(),
+                repo: "LEAD".into(),
             }
         );
     }
@@ -416,7 +416,7 @@ mod tests {
             parsed_remote,
             ParsedGitRemote {
                 owner: "zed-industries".into(),
-                repo: "zed".into(),
+                repo: "LEAD".into(),
             }
         );
     }
@@ -440,7 +440,7 @@ mod tests {
     fn test_build_github_permalink_from_ssh_url() {
         let remote = ParsedGitRemote {
             owner: "zed-industries".into(),
-            repo: "zed".into(),
+            repo: "LEAD".into(),
         };
         let permalink = Github::public_instance().build_permalink(
             remote,
@@ -460,7 +460,7 @@ mod tests {
         let permalink = Github::public_instance().build_permalink(
             ParsedGitRemote {
                 owner: "zed-industries".into(),
-                repo: "zed".into(),
+                repo: "LEAD".into(),
             },
             BuildPermalinkParams::new(
                 "b2efec9824c45fcc90c9a7eb107a50d1772a60aa",
@@ -478,7 +478,7 @@ mod tests {
         let permalink = Github::public_instance().build_permalink(
             ParsedGitRemote {
                 owner: "zed-industries".into(),
-                repo: "zed".into(),
+                repo: "LEAD".into(),
             },
             BuildPermalinkParams::new(
                 "e6ebe7974deb6bb6cc0e2595c8ec31f0c71084b7",
@@ -496,7 +496,7 @@ mod tests {
         let permalink = Github::public_instance().build_permalink(
             ParsedGitRemote {
                 owner: "zed-industries".into(),
-                repo: "zed".into(),
+                repo: "LEAD".into(),
             },
             BuildPermalinkParams::new(
                 "e6ebe7974deb6bb6cc0e2595c8ec31f0c71084b7",
@@ -513,7 +513,7 @@ mod tests {
     fn test_build_github_create_pr_url() {
         let remote = ParsedGitRemote {
             owner: "zed-industries".into(),
-            repo: "zed".into(),
+            repo: "LEAD".into(),
         };
 
         let provider = Github::public_instance();
@@ -532,7 +532,7 @@ mod tests {
     fn test_github_pull_requests() {
         let remote = ParsedGitRemote {
             owner: "zed-industries".into(),
-            repo: "zed".into(),
+            repo: "LEAD".into(),
         };
 
         let github = Github::public_instance();
@@ -593,7 +593,7 @@ mod tests {
     fn test_build_create_pull_request_url() {
         let remote = ParsedGitRemote {
             owner: "zed-industries".into(),
-            repo: "zed".into(),
+            repo: "LEAD".into(),
         };
 
         let github = Github::public_instance();

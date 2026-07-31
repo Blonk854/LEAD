@@ -175,8 +175,85 @@ pub struct AgentSettings {
     pub show_merge_conflict_indicator: bool,
     pub tool_permissions: ToolPermissions,
     pub sandbox_permissions: SandboxPermissions,
+    pub full_access: FullAccessSettings,
     pub network_agent: NetworkAgentSettings,
     pub auto_thread_rollover: AutoThreadRollover,
+    pub anti_loop: AntiLoopSettings,
+    pub web_research: WebResearchSettings,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WebResearchSettings {
+    pub enabled: bool,
+    pub preferred_provider: String,
+    pub max_search_results: usize,
+    pub max_snippet_chars: usize,
+    pub max_fetch_chars: usize,
+    pub max_response_bytes: u64,
+    pub max_redirects: u32,
+    pub request_timeout_ms: u64,
+    pub max_concurrency: usize,
+    pub per_host_delay_ms: u64,
+    pub browser_fallback_enabled: bool,
+    pub browser_timeout_secs: u64,
+    pub max_pages: usize,
+    pub max_depth: usize,
+    pub research_wall_clock_secs: u64,
+}
+
+impl Default for WebResearchSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            preferred_provider: "local".into(),
+            max_search_results: 5,
+            max_snippet_chars: 300,
+            max_fetch_chars: 12_000,
+            max_response_bytes: 1024 * 1024,
+            max_redirects: 5,
+            request_timeout_ms: 15_000,
+            max_concurrency: 2,
+            per_host_delay_ms: 1_000,
+            browser_fallback_enabled: false,
+            browser_timeout_secs: 45,
+            max_pages: 6,
+            max_depth: 1,
+            research_wall_clock_secs: 90,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AntiLoopSettings {
+    pub enabled: bool,
+    pub max_recoveries_per_turn: usize,
+    pub min_block_chars: usize,
+    pub max_block_chars: usize,
+    pub min_repeats: usize,
+    pub min_text_chars_before_trip: usize,
+    pub watch_thinking: bool,
+    pub thinking_min_block_chars: usize,
+    pub thinking_max_block_chars: usize,
+    pub thinking_min_repeats: usize,
+    pub thinking_min_text_chars_before_trip: usize,
+}
+
+impl Default for AntiLoopSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_recoveries_per_turn: 1,
+            min_block_chars: 64,
+            max_block_chars: 1_024,
+            min_repeats: 3,
+            min_text_chars_before_trip: 256,
+            watch_thinking: true,
+            thinking_min_block_chars: 128,
+            thinking_max_block_chars: 1_024,
+            thinking_min_repeats: 4,
+            thinking_min_text_chars_before_trip: 512,
+        }
+    }
 }
 
 /// Resolved configuration for automatic thread rollover and hand-off.
@@ -204,10 +281,133 @@ impl Default for AutoThreadRollover {
 /// When [`enabled`](Self::enabled) and a [`model`](Self::model) is configured,
 /// a model served from a network endpoint drives the main agent while the
 /// local `default_model` handles delegated subagent work.
+/// How the network orchestrator delegates work to the local worker model.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NetworkAgentDelegationMode {
+    /// Hide heavy execution tools from the main thread so the network model
+    /// must delegate via `spawn_agent`.
+    #[default]
+    Balanced,
+    /// Prompt-only guidance; main thread keeps all profile tools.
+    Manual,
+}
+
+impl NetworkAgentDelegationMode {
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "manual" => Self::Manual,
+            _ => Self::Balanced,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Balanced => "balanced",
+            Self::Manual => "manual",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct NetworkAgentSettings {
     pub enabled: bool,
     pub model: Option<String>,
+    pub delegation_mode: NetworkAgentDelegationMode,
+    pub workers: NetworkAgentWorkers,
+}
+
+/// How hybrid subagent work is scheduled across worker endpoints.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WorkerScheduling {
+    /// Prefer a worker with spare capacity; fall back to least-loaded.
+    Pool,
+    RoundRobin,
+    #[default]
+    LeastBusy,
+}
+
+impl WorkerScheduling {
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "pool" => Self::Pool,
+            "round_robin" | "round-robin" => Self::RoundRobin,
+            _ => Self::LeastBusy,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pool => "pool",
+            Self::RoundRobin => "round_robin",
+            Self::LeastBusy => "least_busy",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NetworkAgentWorkerEndpoint {
+    pub id: String,
+    pub provider: LanguageModelProviderSetting,
+    pub model: String,
+    pub max_concurrent: u32,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NetworkAgentWorkers {
+    pub scheduling: WorkerScheduling,
+    pub max_workers: u32,
+    pub include_default_model: bool,
+    pub endpoints: Vec<NetworkAgentWorkerEndpoint>,
+}
+
+impl Default for NetworkAgentWorkers {
+    fn default() -> Self {
+        Self {
+            scheduling: WorkerScheduling::default(),
+            max_workers: 10,
+            include_default_model: true,
+            endpoints: Vec::new(),
+        }
+    }
+}
+
+impl NetworkAgentWorkers {
+    /// True when at least one remote worker endpoint is configured.
+    pub fn is_active(&self) -> bool {
+        self.endpoints.iter().any(|endpoint| endpoint.enabled)
+    }
+
+    /// Enabled endpoints capped at [`max_workers`], optionally including the default model.
+    pub fn resolved_endpoints(
+        &self,
+        default_model: &Option<LanguageModelSelection>,
+    ) -> Vec<NetworkAgentWorkerEndpoint> {
+        let mut endpoints: Vec<NetworkAgentWorkerEndpoint> = self
+            .endpoints
+            .iter()
+            .filter(|endpoint| endpoint.enabled)
+            .cloned()
+            .collect();
+
+        if self.include_default_model
+            && let Some(default_model) = default_model
+        {
+            endpoints.insert(
+                0,
+                NetworkAgentWorkerEndpoint {
+                    id: "default".into(),
+                    provider: default_model.provider.clone(),
+                    model: default_model.model.clone(),
+                    max_concurrent: 1,
+                    enabled: true,
+                },
+            );
+        }
+
+        endpoints.truncate(self.max_workers.max(1).min(10) as usize);
+        endpoints
+    }
 }
 
 impl AgentSettings {
@@ -257,6 +457,42 @@ impl AgentSettings {
     /// True when the Network Agent toggle is on and a network model is configured.
     pub fn network_agent_active(&self) -> bool {
         self.network_agent.enabled && self.network_agent.model.is_some()
+    }
+
+    /// Whether guard-railed whole-PC native tools may be exposed.
+    pub fn full_access_enabled(&self) -> bool {
+        self.full_access.enabled
+    }
+
+    pub fn network_agent_delegation_mode(&self) -> NetworkAgentDelegationMode {
+        self.network_agent.delegation_mode
+    }
+
+    /// Label for the local worker model used by subagents in hybrid mode.
+    pub fn local_worker_model_label(&self) -> Option<String> {
+        self.default_model
+            .as_ref()
+            .map(|selection| format!("{}/{}", selection.provider.0, selection.model))
+    }
+
+    /// Label for hybrid worker pool members, or the single local worker when no pool is configured.
+    pub fn hybrid_worker_model_label(&self) -> Option<String> {
+        if self.network_agent_active() && self.network_agent.workers.is_active() {
+            let labels: Vec<String> = self
+                .network_agent
+                .workers
+                .resolved_endpoints(&self.default_model)
+                .iter()
+                .map(|endpoint| format!("{}/{}", endpoint.provider.0, endpoint.model))
+                .collect();
+            if labels.is_empty() {
+                None
+            } else {
+                Some(labels.join(", "))
+            }
+        } else {
+            self.local_worker_model_label()
+        }
     }
 
     /// The model selection that should drive the main agent, accounting for the
@@ -427,6 +663,14 @@ pub struct SandboxPermissions {
     pub allow_fs_write_all: bool,
     pub allow_unsandboxed: bool,
     pub write_paths: Vec<PathBuf>,
+}
+
+/// Guard-railed access to resources outside open project worktrees.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FullAccessSettings {
+    pub enabled: bool,
+    pub allowed_roots: Vec<PathBuf>,
+    pub denied_roots: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -769,11 +1013,18 @@ impl Settings for AgentSettings {
             show_merge_conflict_indicator: agent.show_merge_conflict_indicator.unwrap(),
             tool_permissions: compile_tool_permissions(agent.tool_permissions),
             sandbox_permissions: compile_sandbox_permissions(agent.sandbox_permissions),
+            full_access: compile_full_access_settings(agent.full_access),
             network_agent: agent
                 .network_agent
                 .map(|content| NetworkAgentSettings {
                     enabled: content.enabled.unwrap_or(false),
                     model: content.model.filter(|model| !model.is_empty()),
+                    delegation_mode: content
+                        .delegation_mode
+                        .as_deref()
+                        .map(NetworkAgentDelegationMode::parse)
+                        .unwrap_or_default(),
+                    workers: compile_network_agent_workers(content.workers),
                 })
                 .unwrap_or_default(),
             auto_thread_rollover: agent
@@ -789,7 +1040,258 @@ impl Settings for AgentSettings {
                     }
                 })
                 .unwrap_or_default(),
+            anti_loop: compile_anti_loop_settings(agent.anti_loop),
+            web_research: compile_web_research_settings(agent.web_research),
         }
+    }
+}
+
+fn compile_web_research_settings(
+    content: Option<settings::WebResearchSettingsContent>,
+) -> WebResearchSettings {
+    let defaults = WebResearchSettings::default();
+    let Some(content) = content else {
+        return defaults;
+    };
+    WebResearchSettings {
+        enabled: content.enabled.unwrap_or(defaults.enabled),
+        preferred_provider: content
+            .preferred_provider
+            .map(|value| match value.trim().to_ascii_lowercase().as_str() {
+                "cloud" => "cloud".to_string(),
+                "auto" => "auto".to_string(),
+                _ => "local".to_string(),
+            })
+            .unwrap_or(defaults.preferred_provider),
+        max_search_results: content
+            .max_search_results
+            .filter(|value| (1..=20).contains(value))
+            .unwrap_or(defaults.max_search_results),
+        max_snippet_chars: content
+            .max_snippet_chars
+            .filter(|value| (80..=2_000).contains(value))
+            .unwrap_or(defaults.max_snippet_chars),
+        max_fetch_chars: content
+            .max_fetch_chars
+            .filter(|value| (1_000..=100_000).contains(value))
+            .unwrap_or(defaults.max_fetch_chars),
+        max_response_bytes: content
+            .max_response_bytes
+            .filter(|value| (16_384..=8 * 1024 * 1024).contains(value))
+            .unwrap_or(defaults.max_response_bytes),
+        max_redirects: content
+            .max_redirects
+            .filter(|value| (0..=20).contains(value))
+            .unwrap_or(defaults.max_redirects),
+        request_timeout_ms: content
+            .request_timeout_ms
+            .filter(|value| (1_000..=120_000).contains(value))
+            .unwrap_or(defaults.request_timeout_ms),
+        max_concurrency: content
+            .max_concurrency
+            .filter(|value| (1..=8).contains(value))
+            .unwrap_or(defaults.max_concurrency),
+        per_host_delay_ms: content
+            .per_host_delay_ms
+            .filter(|value| (0..=30_000).contains(value))
+            .unwrap_or(defaults.per_host_delay_ms),
+        browser_fallback_enabled: content
+            .browser_fallback_enabled
+            .unwrap_or(defaults.browser_fallback_enabled),
+        browser_timeout_secs: content
+            .browser_timeout_secs
+            .filter(|value| (5..=180).contains(value))
+            .unwrap_or(defaults.browser_timeout_secs),
+        max_pages: content
+            .max_pages
+            .filter(|value| (1..=12).contains(value))
+            .unwrap_or(defaults.max_pages),
+        max_depth: content
+            .max_depth
+            .filter(|value| (0..=3).contains(value))
+            .unwrap_or(defaults.max_depth),
+        research_wall_clock_secs: content
+            .research_wall_clock_secs
+            .filter(|value| (15..=300).contains(value))
+            .unwrap_or(defaults.research_wall_clock_secs),
+    }
+}
+
+fn compile_anti_loop_settings(
+    content: Option<settings::AntiLoopSettingsContent>,
+) -> AntiLoopSettings {
+    // Keep this aligned with the detector's rolling window so resolved settings
+    // never advertise a larger candidate block than the watchdog can inspect.
+    const ROLLING_WINDOW_CHARS: usize = 16 * 1024;
+    const MAX_BLOCK_CHARS_LIMIT: usize = 4_096;
+    const MAX_RECOVERIES_LIMIT: usize = 3;
+    const MAX_REPEATS_LIMIT: usize = 8;
+
+    let defaults = AntiLoopSettings::default();
+    let Some(content) = content else {
+        return defaults;
+    };
+
+    let min_repeats = content
+        .min_repeats
+        .filter(|value| (2..=MAX_REPEATS_LIMIT).contains(value))
+        .unwrap_or(defaults.min_repeats);
+    let min_block_chars = content
+        .min_block_chars
+        .filter(|value| (16..=MAX_BLOCK_CHARS_LIMIT).contains(value))
+        .unwrap_or(defaults.min_block_chars);
+    let detector_max_block_chars = (ROLLING_WINDOW_CHARS / min_repeats).max(min_block_chars);
+    let max_block_chars = content
+        .max_block_chars
+        .filter(|value| {
+            (min_block_chars..=MAX_BLOCK_CHARS_LIMIT.min(detector_max_block_chars)).contains(value)
+        })
+        .unwrap_or_else(|| {
+            defaults
+                .max_block_chars
+                .max(min_block_chars)
+                .min(detector_max_block_chars)
+        });
+    let thinking_min_repeats = content
+        .thinking_min_repeats
+        .filter(|value| (2..=MAX_REPEATS_LIMIT).contains(value))
+        .unwrap_or(defaults.thinking_min_repeats);
+    let thinking_min_block_chars = content
+        .thinking_min_block_chars
+        .filter(|value| (16..=MAX_BLOCK_CHARS_LIMIT).contains(value))
+        .unwrap_or(defaults.thinking_min_block_chars);
+    let thinking_detector_max_block_chars =
+        (ROLLING_WINDOW_CHARS / thinking_min_repeats).max(thinking_min_block_chars);
+    let thinking_max_block_chars = content
+        .thinking_max_block_chars
+        .filter(|value| {
+            (thinking_min_block_chars
+                ..=MAX_BLOCK_CHARS_LIMIT.min(thinking_detector_max_block_chars))
+                .contains(value)
+        })
+        .unwrap_or_else(|| {
+            defaults
+                .thinking_max_block_chars
+                .max(thinking_min_block_chars)
+                .min(thinking_detector_max_block_chars)
+        });
+
+    AntiLoopSettings {
+        enabled: content.enabled.unwrap_or(defaults.enabled),
+        max_recoveries_per_turn: content
+            .max_recoveries_per_turn
+            .filter(|value| *value <= MAX_RECOVERIES_LIMIT)
+            .unwrap_or(defaults.max_recoveries_per_turn),
+        min_block_chars,
+        max_block_chars,
+        min_repeats,
+        min_text_chars_before_trip: content
+            .min_text_chars_before_trip
+            .filter(|value| *value >= min_block_chars.saturating_mul(min_repeats))
+            .unwrap_or_else(|| {
+                defaults
+                    .min_text_chars_before_trip
+                    .max(min_block_chars.saturating_mul(min_repeats))
+            }),
+        watch_thinking: content.watch_thinking.unwrap_or(defaults.watch_thinking),
+        thinking_min_block_chars,
+        thinking_max_block_chars,
+        thinking_min_repeats,
+        thinking_min_text_chars_before_trip: content
+            .thinking_min_text_chars_before_trip
+            .filter(|value| *value >= thinking_min_block_chars.saturating_mul(thinking_min_repeats))
+            .unwrap_or_else(|| {
+                defaults
+                    .thinking_min_text_chars_before_trip
+                    .max(thinking_min_block_chars.saturating_mul(thinking_min_repeats))
+            }),
+    }
+}
+
+fn compile_network_agent_workers(
+    content: Option<settings::NetworkAgentWorkersContent>,
+) -> NetworkAgentWorkers {
+    let Some(content) = content else {
+        return NetworkAgentWorkers::default();
+    };
+
+    let defaults = NetworkAgentWorkers::default();
+    let max_workers = content
+        .max_workers
+        .unwrap_or(defaults.max_workers)
+        .clamp(1, 10);
+
+    let endpoints = content
+        .endpoints
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|endpoint| {
+            let id = endpoint.id.filter(|id| !id.trim().is_empty())?;
+            let provider = endpoint
+                .provider
+                .filter(|provider| !provider.trim().is_empty())?;
+            let model = endpoint.model.filter(|model| !model.trim().is_empty())?;
+            Some(NetworkAgentWorkerEndpoint {
+                id,
+                provider: LanguageModelProviderSetting(provider.into()),
+                model,
+                max_concurrent: endpoint.max_concurrent.unwrap_or(1).max(1),
+                enabled: endpoint.enabled.unwrap_or(true),
+            })
+        })
+        .collect();
+
+    NetworkAgentWorkers {
+        scheduling: content
+            .scheduling
+            .as_deref()
+            .map(WorkerScheduling::parse)
+            .unwrap_or_default(),
+        max_workers,
+        include_default_model: content
+            .include_default_model
+            .unwrap_or(defaults.include_default_model),
+        endpoints,
+    }
+}
+
+fn compile_full_access_settings(
+    content: Option<settings::FullAccessSettingsContent>,
+) -> FullAccessSettings {
+    let Some(content) = content else {
+        return FullAccessSettings::default();
+    };
+
+    let mut allowed_roots = Vec::new();
+    for path in content
+        .allowed_roots
+        .map(|paths| paths.0)
+        .unwrap_or_default()
+    {
+        if path.is_absolute()
+            && let Ok(normalized) = util::paths::normalize_lexically(&path)
+        {
+            util::paths::insert_subtree(&mut allowed_roots, normalized);
+        }
+    }
+
+    let mut denied_roots = Vec::new();
+    for path in content
+        .denied_roots
+        .map(|paths| paths.0)
+        .unwrap_or_default()
+    {
+        if path.is_absolute()
+            && let Ok(normalized) = util::paths::normalize_lexically(&path)
+        {
+            util::paths::insert_subtree(&mut denied_roots, normalized);
+        }
+    }
+
+    FullAccessSettings {
+        enabled: content.enabled.unwrap_or(false),
+        allowed_roots,
+        denied_roots,
     }
 }
 
@@ -995,6 +1497,33 @@ mod tests {
     fn test_sandbox_permissions_empty() {
         let permissions = compile_sandbox_permissions(None);
         assert_eq!(permissions, SandboxPermissions::default());
+    }
+
+    #[test]
+    fn test_full_access_settings_require_absolute_normalized_roots() {
+        let (allowed, denied) = if cfg!(windows) {
+            (r"C:\tmp\agent\..\agent", r"C:\protected")
+        } else {
+            ("/tmp/agent/../agent", "/protected")
+        };
+        let content: settings::FullAccessSettingsContent = serde_json::from_value(json!({
+            "enabled": true,
+            "allowed_roots": [allowed, "relative/path"],
+            "denied_roots": [denied]
+        }))
+        .unwrap();
+        let settings = compile_full_access_settings(Some(content));
+
+        assert!(settings.enabled);
+        assert_eq!(
+            settings.allowed_roots,
+            vec![if cfg!(windows) {
+                PathBuf::from(r"C:\tmp\agent")
+            } else {
+                PathBuf::from("/tmp/agent")
+            }]
+        );
+        assert_eq!(settings.denied_roots, vec![PathBuf::from(denied)]);
     }
 
     #[test]
@@ -1467,6 +1996,65 @@ mod tests {
     }
 
     #[gpui::test]
+    fn test_anti_loop_defaults_and_bounds(cx: &mut gpui::App) {
+        let store = SettingsStore::test(cx);
+        cx.set_global(store);
+        project::DisableAiSettings::register(cx);
+        AgentSettings::register(cx);
+
+        let defaults = &AgentSettings::get_global(cx).anti_loop;
+        assert!(defaults.enabled);
+        assert_eq!(defaults.max_recoveries_per_turn, 1);
+        assert_eq!(defaults.min_block_chars, 64);
+        assert_eq!(defaults.max_block_chars, 1_024);
+        assert_eq!(defaults.min_repeats, 3);
+        assert_eq!(defaults.min_text_chars_before_trip, 256);
+        assert!(defaults.watch_thinking);
+        assert_eq!(defaults.thinking_min_block_chars, 128);
+        assert_eq!(defaults.thinking_max_block_chars, 1_024);
+        assert_eq!(defaults.thinking_min_repeats, 4);
+        assert_eq!(defaults.thinking_min_text_chars_before_trip, 512);
+
+        SettingsStore::update_global(cx, |store, cx| {
+            store
+                .set_user_settings(
+                    r#"{
+                        "agent": {
+                            "anti_loop": {
+                                "enabled": false,
+                                "max_recoveries_per_turn": 99,
+                                "min_block_chars": 1,
+                                "max_block_chars": 2,
+                                "min_repeats": 1,
+                                "min_text_chars_before_trip": 1,
+                                "watch_thinking": false,
+                                "thinking_min_block_chars": 1,
+                                "thinking_max_block_chars": 2,
+                                "thinking_min_repeats": 1,
+                                "thinking_min_text_chars_before_trip": 1
+                            }
+                        }
+                    }"#,
+                    cx,
+                )
+                .unwrap();
+        });
+
+        let bounded = &AgentSettings::get_global(cx).anti_loop;
+        assert!(!bounded.enabled);
+        assert_eq!(bounded.max_recoveries_per_turn, 1);
+        assert_eq!(bounded.min_block_chars, 64);
+        assert_eq!(bounded.max_block_chars, 1_024);
+        assert_eq!(bounded.min_repeats, 3);
+        assert_eq!(bounded.min_text_chars_before_trip, 256);
+        assert!(!bounded.watch_thinking);
+        assert_eq!(bounded.thinking_min_block_chars, 128);
+        assert_eq!(bounded.thinking_max_block_chars, 1_024);
+        assert_eq!(bounded.thinking_min_repeats, 4);
+        assert_eq!(bounded.thinking_min_text_chars_before_trip, 512);
+    }
+
+    #[gpui::test]
     fn test_get_layout(cx: &mut gpui::App) {
         let store = SettingsStore::test(cx);
         cx.set_global(store);
@@ -1733,5 +2321,88 @@ mod tests {
             assert_eq!(user_layout.agent_dock, Some(DockPosition::Right));
             assert_eq!(user_layout.project_panel_dock, Some(DockSide::Right));
         });
+    }
+
+    #[test]
+    fn test_effective_default_model_uses_network_when_active() {
+        let settings = AgentSettings {
+            network_agent: NetworkAgentSettings {
+                enabled: true,
+                model: Some("net-model".into()),
+                delegation_mode: NetworkAgentDelegationMode::Balanced,
+                workers: NetworkAgentWorkers::default(),
+            },
+            default_model: Some(LanguageModelSelection {
+                provider: LanguageModelProviderSetting("lmstudio".into()),
+                model: "local-model".into(),
+                enable_thinking: false,
+                effort: None,
+                speed: None,
+            }),
+            enabled: false,
+            button: false,
+            dock: settings::DockPosition::Right,
+            flexible: true,
+            default_width: gpui::px(300.),
+            default_height: gpui::px(600.),
+            max_content_width: None,
+            subagent_model: None,
+            inline_assistant_model: None,
+            inline_assistant_use_streaming_tools: false,
+            commit_message_model: None,
+            commit_message_instructions: None,
+            thread_summary_model: None,
+            inline_alternatives: vec![],
+            favorite_models: vec![],
+            default_profile: AgentProfileId::default(),
+            profiles: Default::default(),
+            notify_when_agent_waiting: settings::NotifyWhenAgentWaiting::default(),
+            play_sound_when_agent_done: settings::PlaySoundWhenAgentDone::Never,
+            single_file_review: false,
+            model_parameters: vec![],
+            enable_feedback: false,
+            expand_edit_card: true,
+            expand_terminal_card: true,
+            cancel_generation_on_terminal_stop: true,
+            use_modifier_to_send: false,
+            message_editor_min_lines: 1,
+            tool_permissions: Default::default(),
+            sandbox_permissions: Default::default(),
+            full_access: Default::default(),
+            show_turn_stats: false,
+            show_merge_conflict_indicator: true,
+            sidebar_side: Default::default(),
+            thinking_display: Default::default(),
+            auto_thread_rollover: Default::default(),
+            anti_loop: Default::default(),
+            web_research: Default::default(),
+        };
+
+        let effective = settings.effective_default_model().unwrap();
+        assert_eq!(
+            effective.provider.0,
+            AgentSettings::NETWORK_AGENT_PROVIDER_ID
+        );
+        assert_eq!(effective.model, "net-model");
+
+        let subagent = settings.effective_subagent_model().unwrap();
+        assert_eq!(subagent.provider.0, "lmstudio");
+        assert_eq!(subagent.model, "local-model");
+    }
+
+    #[test]
+    fn test_delegation_mode_parsing() {
+        assert_eq!(
+            NetworkAgentDelegationMode::parse("balanced"),
+            NetworkAgentDelegationMode::Balanced
+        );
+        assert_eq!(
+            NetworkAgentDelegationMode::parse("manual"),
+            NetworkAgentDelegationMode::Manual
+        );
+        assert_eq!(
+            NetworkAgentDelegationMode::parse("unknown"),
+            NetworkAgentDelegationMode::Balanced
+        );
     }
 }

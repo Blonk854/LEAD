@@ -230,7 +230,7 @@ fn chart_color_css(theme: &MermaidTheme) -> String {
     let mut css = String::with_capacity(8 * 250);
     for i in 0..8 {
         let color = crate::css_color(theme.git_branch_colors[i]);
-        let class = format!(".zed-chart-{i}");
+        let class = format!(".LEAD-chart-{i}");
         write!(
             css,
             "path.pieCircle{class} {{ fill: {color} !important; }}\n\

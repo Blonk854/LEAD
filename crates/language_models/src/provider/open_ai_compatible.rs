@@ -35,6 +35,78 @@ pub struct OpenAiCompatibleSettings {
     pub custom_headers: CustomHeaders,
 }
 
+/// OpenAI-compatible endpoints expect `{base}/v1/chat/completions`. LM Studio and
+/// similar servers break if `/v1` is omitted from the configured base URL.
+pub fn normalize_openai_compatible_api_url(api_url: &str) -> String {
+    let mut trimmed = api_url.trim().trim_end_matches('/').to_string();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    // Users sometimes paste a full completions URL from API docs.
+    for suffix in ["/chat/completions", "/completions", "/embeddings"] {
+        if let Some(base) = trimmed.strip_suffix(suffix) {
+            trimmed = base.trim_end_matches('/').to_string();
+            break;
+        }
+    }
+
+    if trimmed.ends_with("/v1") {
+        trimmed
+    } else {
+        format!("{trimmed}/v1")
+    }
+}
+
+/// Local OpenAI-compatible servers (LM Studio, Ollama, etc.) require tool
+/// `parameters` to be a JSON object with a `properties` map.
+pub fn normalize_local_openai_tool_parameters(schema: serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Object(mut map) = schema else {
+        return serde_json::json!({ "type": "object", "properties": {} });
+    };
+
+    if !map.contains_key("properties") {
+        map.insert("properties".into(), serde_json::json!({}));
+    }
+    if !map.contains_key("type") {
+        map.insert("type".into(), serde_json::json!("object"));
+    }
+    serde_json::Value::Object(map)
+}
+
+/// Adjusts a chat-completions payload for local OpenAI-compatible servers.
+pub fn sanitize_local_openai_compatible_request(request: &mut open_ai::Request) {
+    for tool in &mut request.tools {
+        if let open_ai::ToolDefinition::Function { function } = tool
+            && let Some(parameters) = function.parameters.take()
+        {
+            function.parameters = Some(normalize_local_openai_tool_parameters(parameters));
+        }
+    }
+
+    // Ask for usage on the final stream chunk so the agent panel context meter
+    // can update. Modern LM Studio accepts this; older/quirky backends that
+    // reject it still get an estimated meter via Thread::latest_token_usage.
+    request.stream_options = Some(open_ai::StreamOptions {
+        include_usage: true,
+    });
+    if request.temperature == Some(1.0) {
+        request.temperature = None;
+    }
+}
+
+/// Reserved provider id for the Network Agent's OpenAI-compatible endpoint.
+pub const NETWORK_AGENT_PROVIDER_ID: &str = "network-agent";
+
+/// Placeholder bearer token for local OpenAI-compatible servers that do not
+/// require authentication (LM Studio, Ollama, etc.).
+pub const LOCAL_OPENAI_COMPATIBLE_PLACEHOLDER_API_KEY: &str = "network-agent";
+
+fn normalize_settings(mut settings: OpenAiCompatibleSettings) -> OpenAiCompatibleSettings {
+    settings.api_url = normalize_openai_compatible_api_url(&settings.api_url);
+    settings
+}
+
 pub struct OpenAiCompatibleLanguageModelProvider {
     id: LanguageModelProviderId,
     name: LanguageModelProviderName,
@@ -50,8 +122,44 @@ pub struct State {
 }
 
 impl State {
+    fn is_network_agent(&self) -> bool {
+        self.id.as_ref() == NETWORK_AGENT_PROVIDER_ID
+    }
+
+    fn is_configured(&self) -> bool {
+        !self.settings.api_url.is_empty() && !self.settings.available_models.is_empty()
+    }
+
     fn is_authenticated(&self) -> bool {
+        if self.is_network_agent() {
+            return self.is_configured();
+        }
         self.api_key_state.has_key()
+    }
+
+    fn api_key_for_request(&self) -> Option<Arc<str>> {
+        if let Some(key) = self.api_key_state.key(&self.settings.api_url) {
+            return Some(key);
+        }
+        // Local OpenAI-compatible servers (LM Studio, Ollama) do not require auth.
+        // Always send a harmless placeholder so requests are never blocked on keychain races.
+        if self.is_network_agent() {
+            return Some(Arc::from(LOCAL_OPENAI_COMPATIBLE_PLACEHOLDER_API_KEY));
+        }
+        None
+    }
+
+    fn ensure_network_agent_api_key(&mut self) {
+        if !self.is_network_agent() || self.settings.api_url.is_empty() {
+            return;
+        }
+        if self.api_key_state.key(&self.settings.api_url).is_some() {
+            return;
+        }
+        self.api_key_state.set_in_memory_key(
+            SharedString::new(self.settings.api_url.as_str()),
+            LOCAL_OPENAI_COMPATIBLE_PLACEHOLDER_API_KEY,
+        );
     }
 
     fn set_api_key(&mut self, api_key: Option<String>, cx: &mut Context<Self>) -> Task<Result<()>> {
@@ -67,6 +175,26 @@ impl State {
     }
 
     fn authenticate(&mut self, cx: &mut Context<Self>) -> Task<Result<(), AuthenticateError>> {
+        if self.is_network_agent() {
+            if !self.is_configured() {
+                return Task::ready(Err(AuthenticateError::CredentialsNotFound));
+            }
+            let was_authenticated = self.is_authenticated();
+            self.ensure_network_agent_api_key();
+            let credentials_provider = self.credentials_provider.clone();
+            let api_url = SharedString::new(self.settings.api_url.clone());
+            let _task = self.api_key_state.load_if_needed(
+                api_url,
+                |this| &mut this.api_key_state,
+                credentials_provider,
+                cx,
+            );
+            if !was_authenticated {
+                cx.notify();
+            }
+            return Task::ready(Ok(()));
+        }
+
         let credentials_provider = self.credentials_provider.clone();
         let api_url = SharedString::new(self.settings.api_url.clone());
         self.api_key_state.load_if_needed(
@@ -97,6 +225,7 @@ impl OpenAiCompatibleLanguageModelProvider {
                 let Some(settings) = resolve_settings(&this.id, cx).cloned() else {
                     return;
                 };
+                let settings = normalize_settings(settings);
                 if &this.settings != &settings {
                     let credentials_provider = this.credentials_provider.clone();
                     let api_url = SharedString::new(settings.api_url.as_str());
@@ -107,12 +236,16 @@ impl OpenAiCompatibleLanguageModelProvider {
                         cx,
                     );
                     this.settings = settings;
+                    this.ensure_network_agent_api_key();
                     cx.notify();
                 }
             })
             .detach();
-            let settings = resolve_settings(&id, cx).cloned().unwrap_or_default();
-            State {
+            let settings = resolve_settings(&id, cx)
+                .cloned()
+                .map(normalize_settings)
+                .unwrap_or_default();
+            let mut state = State {
                 id: id.clone(),
                 api_key_state: ApiKeyState::new(
                     SharedString::new(settings.api_url.as_str()),
@@ -120,12 +253,20 @@ impl OpenAiCompatibleLanguageModelProvider {
                 ),
                 settings,
                 credentials_provider,
-            }
+            };
+            state.ensure_network_agent_api_key();
+            state
         });
 
+        let provider_name = if id.as_ref() == NETWORK_AGENT_PROVIDER_ID {
+            LanguageModelProviderName::from("Network Agent".to_string())
+        } else {
+            LanguageModelProviderName::from(id.to_string())
+        };
+
         Self {
-            id: id.clone().into(),
-            name: id.into(),
+            id: LanguageModelProviderId::from(id.to_string()),
+            name: provider_name,
             http_client,
             state,
         }
@@ -223,6 +364,12 @@ pub struct OpenAiCompatibleLanguageModel {
 }
 
 impl OpenAiCompatibleLanguageModel {
+    fn is_network_agent(&self) -> bool {
+        self.provider_id.0.as_ref() == NETWORK_AGENT_PROVIDER_ID
+    }
+}
+
+impl OpenAiCompatibleLanguageModel {
     fn stream_completion(
         &self,
         request: open_ai::Request,
@@ -237,9 +384,8 @@ impl OpenAiCompatibleLanguageModel {
         let http_client = self.http_client.clone();
 
         let (api_key, api_url, extra_headers) = self.state.read_with(cx, |state, _cx| {
-            let api_url = &state.settings.api_url;
             (
-                state.api_key_state.key(api_url),
+                state.api_key_for_request(),
                 state.settings.api_url.clone(),
                 state.settings.custom_headers.clone(),
             )
@@ -274,9 +420,8 @@ impl OpenAiCompatibleLanguageModel {
         let http_client = self.http_client.clone();
 
         let (api_key, api_url, extra_headers) = self.state.read_with(cx, |state, _cx| {
-            let api_url = &state.settings.api_url;
             (
-                state.api_key_state.key(api_url),
+                state.api_key_for_request(),
                 state.settings.api_url.clone(),
                 state.settings.custom_headers.clone(),
             )
@@ -330,7 +475,13 @@ impl LanguageModel for OpenAiCompatibleLanguageModel {
     }
 
     fn tool_input_format(&self) -> LanguageModelToolSchemaFormat {
-        LanguageModelToolSchemaFormat::JsonSchemaSubset
+        if self.is_network_agent() {
+            // Local OpenAI-compatible servers reject OpenAPI-style JsonSchemaSubset
+            // fields (`nullable`, `anyOf`, etc.) that cloud providers accept.
+            LanguageModelToolSchemaFormat::JsonSchema
+        } else {
+            LanguageModelToolSchemaFormat::JsonSchemaSubset
+        }
     }
 
     fn supports_images(&self) -> bool {
@@ -380,7 +531,7 @@ impl LanguageModel for OpenAiCompatibleLanguageModel {
         >,
     > {
         if self.model.capabilities.chat_completions {
-            let request = into_open_ai(
+            let mut request = into_open_ai(
                 request,
                 &self.model.name,
                 self.model.capabilities.parallel_tool_calls,
@@ -389,6 +540,9 @@ impl LanguageModel for OpenAiCompatibleLanguageModel {
                 self.model.reasoning_effort,
                 self.model.capabilities.interleaved_reasoning,
             );
+            if self.is_network_agent() {
+                sanitize_local_openai_compatible_request(&mut request);
+            }
             let completions = self.stream_completion(request, cx);
             async move {
                 let mapper = OpenAiEventMapper::new();
@@ -506,7 +660,7 @@ impl Render for ConfigurationView {
         let api_key_section = if self.should_render_editor(cx) {
             v_flex()
                 .on_action(cx.listener(Self::save_api_key))
-                .child(Label::new("To use Zed's agent with an OpenAI-compatible provider, you need to add an API key."))
+                .child(Label::new("To use LEAD's agent with an OpenAI-compatible provider, you need to add an API key."))
                 .child(
                     div()
                         .pt(DynamicSpacing::Base04.rems(cx))
@@ -514,7 +668,7 @@ impl Render for ConfigurationView {
                 )
                 .child(
                     Label::new(
-                        format!("You can also set the {env_var_name} environment variable and restart Zed."),
+                        format!("You can also set the {env_var_name} environment variable and restart LEAD."),
                     )
                     .size(LabelSize::Small).color(Color::Muted),
                 )
@@ -570,5 +724,148 @@ impl Render for ConfigurationView {
         } else {
             v_flex().size_full().child(api_key_section).into_any()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::AsyncReadExt;
+    use http_client::{AsyncBody, HttpClient, Method, Request as HttpRequest};
+    use language_model::{
+        LanguageModelRequest, LanguageModelRequestMessage, LanguageModelRequestTool,
+        LanguageModelToolChoice, MessageContent, Role,
+    };
+    use open_ai::completion::into_open_ai;
+
+    #[test]
+    fn normalize_openai_compatible_api_url_appends_v1() {
+        assert_eq!(
+            normalize_openai_compatible_api_url("http://192.168.1.50:1234"),
+            "http://192.168.1.50:1234/v1"
+        );
+        assert_eq!(
+            normalize_openai_compatible_api_url("http://192.168.1.50:1234/v1"),
+            "http://192.168.1.50:1234/v1"
+        );
+    }
+
+    #[test]
+    fn normalize_openai_compatible_api_url_strips_chat_completions_suffix() {
+        assert_eq!(
+            normalize_openai_compatible_api_url("http://192.168.1.50:1234/v1/chat/completions"),
+            "http://192.168.1.50:1234/v1"
+        );
+    }
+
+    #[test]
+    fn sanitize_local_openai_compatible_request_requests_usage() {
+        let mut request = into_open_ai(
+            LanguageModelRequest {
+                messages: vec![LanguageModelRequestMessage {
+                    role: Role::User,
+                    content: vec![MessageContent::Text("hi".into())],
+                    cache: false,
+                    reasoning_details: None,
+                }],
+                ..Default::default()
+            },
+            "test-model",
+            false,
+            false,
+            None,
+            None,
+            false,
+        );
+        request.stream_options = None;
+        sanitize_local_openai_compatible_request(&mut request);
+        let options = request
+            .stream_options
+            .expect("stream_options should be set");
+        assert!(options.include_usage);
+    }
+
+    /// Live test against a local OpenAI-compatible server.
+    /// Run with:
+    /// `NETWORK_AGENT_TEST_URL=http://host:1234/v1 NETWORK_AGENT_TEST_MODEL=model cargo test -p language_models live_network_agent -- --nocapture`
+    #[tokio::test]
+    async fn live_network_agent_chat_with_tools() {
+        let Ok(api_url) = std::env::var("NETWORK_AGENT_TEST_URL") else {
+            return;
+        };
+        let model_name = std::env::var("NETWORK_AGENT_TEST_MODEL")
+            .unwrap_or_else(|_| "qwen3.5-9b-claude-4.6-opus-uncensored-distilled".into());
+
+        let client = reqwest_client::ReqwestClient::user_agent("lead-network-agent-test")
+            .expect("http client");
+
+        let mut request = into_open_ai(
+            LanguageModelRequest {
+                messages: vec![LanguageModelRequestMessage {
+                    role: Role::User,
+                    content: vec![MessageContent::Text(
+                        "Reply with exactly the word OK.".into(),
+                    )],
+                    cache: false,
+                    reasoning_details: None,
+                }],
+                tools: vec![LanguageModelRequestTool {
+                    name: "terminal".into(),
+                    description: "Run a shell command".into(),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "command": { "type": "string" },
+                            "cd": { "type": "string" }
+                        },
+                        "required": ["command", "cd"],
+                        "additionalProperties": false
+                    }),
+                    use_input_streaming: false,
+                }],
+                tool_choice: Some(LanguageModelToolChoice::None),
+                ..Default::default()
+            },
+            &model_name,
+            false,
+            false,
+            None,
+            None,
+            false,
+        );
+        sanitize_local_openai_compatible_request(&mut request);
+
+        let uri = format!(
+            "{}/chat/completions",
+            normalize_openai_compatible_api_url(&api_url)
+        );
+        let http_request = HttpRequest::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header("Content-Type", "application/json")
+            .header(
+                "Authorization",
+                format!("Bearer {}", LOCAL_OPENAI_COMPATIBLE_PLACEHOLDER_API_KEY),
+            )
+            .body(AsyncBody::from(serde_json::to_string(&request).unwrap()))
+            .unwrap();
+
+        let mut response = client.send(http_request).await.expect("request");
+        let status = response.status();
+        let mut body = String::new();
+        response
+            .body_mut()
+            .read_to_string(&mut body)
+            .await
+            .expect("read body");
+
+        assert!(
+            status.is_success(),
+            "expected success from {api_url}, got {status}: {body}"
+        );
+        assert!(
+            body.contains("OK") || body.contains("ok") || body.contains("chat.completion"),
+            "unexpected body: {body}"
+        );
     }
 }

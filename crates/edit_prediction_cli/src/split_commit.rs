@@ -61,7 +61,7 @@ pub struct SplitCommitArgs {
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct AnnotatedCommit {
-    /// Repository path (e.g., "repos/zed")
+    /// Repository path (e.g., "repos/LEAD")
     pub repo: String,
     /// Repository URL (e.g., "https://github.com/zed-industries/zed")
     pub repo_url: String,

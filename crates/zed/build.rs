@@ -14,7 +14,7 @@ fn main() {
             if let Some(libdir) = pkg_config::get_variable(lib, "libdir").ok() {
                 rpath_dirs.insert(libdir);
             } else {
-                eprintln!("zed build.rs: {lib} not found in pkg-config's path");
+                eprintln!("LEAD build.rs: {lib} not found in pkg-config's path");
             }
         }
 
@@ -26,7 +26,7 @@ fn main() {
     if cfg!(target_os = "macos") {
         println!("cargo:rustc-env=MACOSX_DEPLOYMENT_TARGET=10.15.7");
 
-        // Weakly link ReplayKit to ensure Zed can be used on macOS 10.15+.
+        // Weakly link ReplayKit to ensure LEAD can be used on macOS 10.15+.
         println!("cargo:rustc-link-arg=-Wl,-weak_framework,ReplayKit");
 
         // Seems to be required to enable Swift concurrency
@@ -205,6 +205,27 @@ fn main() {
         println!("cargo:rerun-if-env-changed=RELEASE_CHANNEL");
         println!("cargo:rerun-if-env-changed=GITHUB_RUN_NUMBER");
 
+        let resources_dir = std::path::Path::new("resources");
+        for name in [
+            "app-icon.png",
+            "app-icon@2x.png",
+            "app-icon-dev.png",
+            "app-icon-dev@2x.png",
+            "app-icon-nightly.png",
+            "app-icon-nightly@2x.png",
+            "app-icon-preview.png",
+            "app-icon-preview@2x.png",
+            "windows/app-icon.ico",
+            "windows/app-icon-dev.ico",
+            "windows/app-icon-nightly.ico",
+            "windows/app-icon-preview.ico",
+        ] {
+            println!(
+                "cargo:rerun-if-changed={}",
+                resources_dir.join(name).display()
+            );
+        }
+
         #[cfg(windows)]
         {
             windows_resources::compile(false).expect("failed to compile Windows resources");
@@ -250,7 +271,7 @@ fn prepare_app_icon_x11() {
         .unwrap()
         .resize(256, 256, imageops::FilterType::Lanczos3);
 
-    // name should match include_bytes! call in src/zed.rs
+    // name should match include_bytes! call in src/LEAD.rs
     let icon_out_path = Path::new(&out_dir).join("app_icon.png");
     resized_image.save(&icon_out_path).expect("saving app icon");
 

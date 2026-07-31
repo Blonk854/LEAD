@@ -42,7 +42,7 @@ pub struct SystemPromptTemplate<'a> {
     pub available_tools: Vec<SharedString>,
     pub model_name: Option<String>,
     pub date: String,
-    /// Contents of the user-global `~/.config/zed/AGENTS.md` file (or the
+    /// Contents of the user-global `~/.config/LEAD/AGENTS.md` file (or the
     /// platform equivalent), if present and non-empty.
     pub user_agents_md: Option<SharedString>,
     /// Whether agent-run terminal commands are wrapped in an OS-level
@@ -53,6 +53,16 @@ pub struct SystemPromptTemplate<'a> {
     pub sandboxing: bool,
     /// Active persisted goal for Codex-style `/goal` mode.
     pub active_goal: Option<&'a ThreadGoal>,
+    /// Durable per-project summary and journal notes from previous sessions.
+    pub project_memory: Option<SharedString>,
+    /// True when this thread is the network orchestrator in hybrid mode.
+    pub hybrid_mode: bool,
+    /// Label for the local worker model subagents use (`provider/model`).
+    pub local_worker_model: Option<String>,
+    /// True when balanced delegation hides execution tools from the orchestrator.
+    pub balanced_delegation: bool,
+    /// True when guard-railed whole-PC tools are enabled.
+    pub full_access: bool,
 }
 
 impl Template for SystemPromptTemplate<'_> {
@@ -99,10 +109,15 @@ mod tests {
             user_agents_md: None,
             sandboxing: false,
             active_goal: None,
+            project_memory: None,
+            hybrid_mode: false,
+            local_worker_model: None,
+            balanced_delegation: false,
+            full_access: false,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
-        assert!(rendered.contains("You are the Zed coding agent"));
+        assert!(rendered.contains("You are the LEAD coding agent"));
         assert!(rendered.contains("Today's Date: 2026-01-01"));
         assert!(rendered.contains("## Fixing Diagnostics"));
         assert!(rendered.contains("## Planning"));
@@ -133,6 +148,11 @@ mod tests {
             user_agents_md: Some("always be concise".into()),
             sandboxing: false,
             active_goal: None,
+            project_memory: None,
+            hybrid_mode: false,
+            local_worker_model: None,
+            balanced_delegation: false,
+            full_access: false,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -161,6 +181,11 @@ mod tests {
             user_agents_md: None,
             sandboxing: false,
             active_goal: None,
+            project_memory: None,
+            hybrid_mode: false,
+            local_worker_model: None,
+            balanced_delegation: false,
+            full_access: false,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -193,6 +218,11 @@ mod tests {
             user_agents_md: None,
             sandboxing: true,
             active_goal: None,
+            project_memory: None,
+            hybrid_mode: false,
+            local_worker_model: None,
+            balanced_delegation: false,
+            full_access: false,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -218,6 +248,11 @@ mod tests {
             user_agents_md: None,
             sandboxing: true,
             active_goal: None,
+            project_memory: None,
+            hybrid_mode: false,
+            local_worker_model: None,
+            balanced_delegation: false,
+            full_access: false,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -237,6 +272,11 @@ mod tests {
             user_agents_md: None,
             sandboxing: false,
             active_goal: None,
+            project_memory: None,
+            hybrid_mode: false,
+            local_worker_model: None,
+            balanced_delegation: false,
+            full_access: false,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -254,11 +294,40 @@ mod tests {
             user_agents_md: None,
             sandboxing: false,
             active_goal: None,
+            project_memory: None,
+            hybrid_mode: false,
+            local_worker_model: None,
+            balanced_delegation: false,
+            full_access: false,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
 
         assert!(!rendered.contains("The user has specified the following rules"));
         assert!(!rendered.contains("Rules title:"));
+    }
+
+    #[test]
+    fn test_hybrid_system_prompt_section() {
+        let project = prompt_store::ProjectContext::default();
+        let template = SystemPromptTemplate {
+            project: &project,
+            available_tools: vec!["spawn_agent".into(), "read_file".into()],
+            model_name: Some("net-model".to_string()),
+            date: "2026-01-01".to_string(),
+            user_agents_md: None,
+            sandboxing: false,
+            active_goal: None,
+            project_memory: None,
+            hybrid_mode: true,
+            local_worker_model: Some("lmstudio/local-model".to_string()),
+            balanced_delegation: true,
+            full_access: false,
+        };
+        let templates = Templates::new();
+        let rendered = template.render(&templates).unwrap();
+        assert!(rendered.contains("Hybrid orchestrator mode"));
+        assert!(rendered.contains("lmstudio/local-model"));
+        assert!(rendered.contains("Balanced delegation is enabled"));
     }
 }

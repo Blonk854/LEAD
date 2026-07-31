@@ -6,18 +6,17 @@ use anyhow::Result;
 use cloud_llm_client::WebSearchResponse;
 use futures::FutureExt as _;
 use gpui::{App, Task};
-use language_model::{
-    LanguageModelProviderId, LanguageModelToolResultContent, ZED_CLOUD_PROVIDER_ID,
-};
+use language_model::LanguageModelToolResultContent;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ui::prelude::*;
 use util::markdown::MarkdownInlineCode;
+use web_research::render_search_results_for_model;
 use web_search::WebSearchRegistry;
 
 /// Search the web for information using your query.
 /// Use this when you need real-time information, facts, or data that might not be in your training.
-/// Results will include snippets and links from relevant web pages.
+/// Results include short snippets and links — fetch a page before asserting facts from snippets alone.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct WebSearchToolInput {
     /// The search term or question to query on the web.
@@ -25,18 +24,53 @@ pub struct WebSearchToolInput {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct WebSearchToolSuccess {
+    pub query: String,
+    pub provider: String,
+    pub response: WebSearchResponse,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum WebSearchToolOutput {
-    Success(WebSearchResponse),
+    Success(WebSearchToolSuccess),
+    /// Legacy shape from older transcripts.
+    LegacySuccess(WebSearchResponse),
     Error { error: String },
 }
 
 impl From<WebSearchToolOutput> for LanguageModelToolResultContent {
     fn from(value: WebSearchToolOutput) -> Self {
         match value {
-            WebSearchToolOutput::Success(response) => serde_json::to_string(&response)
-                .unwrap_or_else(|e| format!("Failed to serialize web search response: {e}"))
-                .into(),
+            WebSearchToolOutput::Success(success) => {
+                let results: Vec<(String, String, String)> = success
+                    .response
+                    .results
+                    .iter()
+                    .map(|result| {
+                        (
+                            result.title.clone(),
+                            result.url.clone(),
+                            result.text.clone(),
+                        )
+                    })
+                    .collect();
+                render_search_results_for_model(&success.provider, &success.query, &results).into()
+            }
+            WebSearchToolOutput::LegacySuccess(response) => {
+                let results: Vec<(String, String, String)> = response
+                    .results
+                    .iter()
+                    .map(|result| {
+                        (
+                            result.title.clone(),
+                            result.url.clone(),
+                            result.text.clone(),
+                        )
+                    })
+                    .collect();
+                render_search_results_for_model("web", "", &results).into()
+            }
             WebSearchToolOutput::Error { error } => error.into(),
         }
     }
@@ -62,9 +96,9 @@ impl AgentTool for WebSearchTool {
         "Searching the Web".into()
     }
 
-    /// We currently only support Zed Cloud as a provider.
-    fn supports_provider(provider: &LanguageModelProviderId) -> bool {
-        provider == &ZED_CLOUD_PROVIDER_ID
+    /// Available whenever a web search provider is registered (local HTML or cloud).
+    fn supports_provider(_provider: &language_model::LanguageModelProviderId) -> bool {
+        true
     }
 
     fn run(
@@ -94,14 +128,18 @@ impl AgentTool for WebSearchTool {
                 .await
                 .map_err(|e| WebSearchToolOutput::Error { error: e.to_string() })?;
 
-            let search_task = cx.update(|cx| {
+            let prepared = cx.update(|cx| {
                 let Some(provider) = WebSearchRegistry::read_global(cx).active_provider() else {
                     return Err(WebSearchToolOutput::Error {
                         error: "Web search is not available.".to_string(),
                     });
                 };
-                Ok(provider.search(input.query, cx))
+                Ok((
+                    provider.id().0.to_string(),
+                    provider.search(input.query.clone(), cx),
+                ))
             })?;
+            let (provider_id, search_task) = prepared;
 
             let response = futures::select! {
                 result = search_task.fuse() => {
@@ -120,7 +158,11 @@ impl AgentTool for WebSearchTool {
             };
 
             emit_update(&response, &event_stream);
-            Ok(WebSearchToolOutput::Success(response))
+            Ok(WebSearchToolOutput::Success(WebSearchToolSuccess {
+                query: input.query,
+                provider: provider_id,
+                response,
+            }))
         })
     }
 
@@ -131,8 +173,10 @@ impl AgentTool for WebSearchTool {
         event_stream: ToolCallEventStream,
         _cx: &mut App,
     ) -> Result<()> {
-        if let WebSearchToolOutput::Success(response) = &output {
-            emit_update(response, &event_stream);
+        match &output {
+            WebSearchToolOutput::Success(success) => emit_update(&success.response, &event_stream),
+            WebSearchToolOutput::LegacySuccess(response) => emit_update(response, &event_stream),
+            WebSearchToolOutput::Error { .. } => {}
         }
         Ok(())
     }

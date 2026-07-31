@@ -371,7 +371,7 @@ pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowO
             height: px(240.0),
         }),
         tabbing_identifier: if use_system_window_tabs {
-            Some(String::from("zed"))
+            Some(String::from("LEAD"))
         } else {
             None
         },
@@ -693,7 +693,7 @@ fn show_software_emulation_warning_if_needed(
         };
         let message = format!(
             db::indoc! {r#"
-            Zed uses {} for rendering and requires a compatible GPU.
+            LEAD uses {} for rendering and requires a compatible GPU.
 
             Currently you are using a software emulated GPU ({}) which
             will result in awful performance.
@@ -1541,7 +1541,7 @@ fn open_about_window(cx: &mut App) {
     cx.open_window(
         WindowOptions {
             titlebar: Some(TitlebarOptions {
-                title: Some("About Zed".into()),
+                title: Some("About LEAD".into()),
                 appears_transparent: true,
                 traffic_light_position: Some(point(px(12.), px(12.))),
             }),
@@ -1873,7 +1873,7 @@ fn init_cursor_hide_mode(cx: &mut App) {
     cx.observe_global::<SettingsStore>(apply).detach();
 }
 
-/// Starts watching `~/.config/zed/AGENTS.md` (or the platform equivalent) and
+/// Starts watching `~/.config/LEAD/AGENTS.md` (or the platform equivalent) and
 /// surfaces any read errors using the same notification UI as settings errors.
 ///
 /// The file itself is loaded into [`agent_settings::UserAgentsMd`] for inclusion
@@ -5267,7 +5267,7 @@ mod tests {
                 "window",
                 "workspace",
                 "worktree_picker",
-                "zed",
+                "LEAD",
                 "zed_actions",
                 "zed_predict_onboarding",
                 "zeta",

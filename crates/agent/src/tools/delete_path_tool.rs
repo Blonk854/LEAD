@@ -191,6 +191,62 @@ impl AgentTool for DeletePathTool {
                 return Ok(format!("Deleted {path}"));
             }
 
+            let requested_path = Path::new(&path);
+            if requested_path.is_absolute()
+                && cx.update(|cx| crate::full_access_enabled(cx))
+                && !project.read_with(cx, |project, cx| {
+                    project.find_project_path(requested_path, cx).is_some()
+                })
+            {
+                let canonical_path =
+                    crate::canonicalize_for_access(requested_path, fs.as_ref()).await?;
+                let context = cx.update(|cx| {
+                    crate::escape_gate(
+                        &project,
+                        std::slice::from_ref(&canonical_path),
+                        Self::NAME,
+                        cx,
+                    )
+                })?;
+                if let Some(context) = context {
+                    let authorize = cx.update(|cx| {
+                        event_stream.authorize(
+                            format!("Delete outside project: {}", canonical_path.display()),
+                            context,
+                            cx,
+                        )
+                    });
+                    authorize.await.map_err(|error| error.to_string())?;
+                }
+                let metadata = fs
+                    .metadata(&canonical_path)
+                    .await
+                    .map_err(|error| format!("Deleting {path}: {error}"))?
+                    .ok_or_else(|| format!("Deleting {path}: path not found"))?;
+                futures::select! {
+                    result = async {
+                        if metadata.is_dir {
+                            fs.remove_dir(
+                                &canonical_path,
+                                fs::RemoveOptions {
+                                    recursive: true,
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                        } else {
+                            fs.remove_file(&canonical_path, fs::RemoveOptions::default()).await
+                        }
+                    }.fuse() => {
+                        result.map_err(|error| format!("Deleting {path}: {error}"))?;
+                    }
+                    _ = event_stream.cancelled_by_user().fuse() => {
+                        return Err("Delete cancelled by user".into());
+                    }
+                }
+                return Ok(format!("Deleted {path}"));
+            }
+
             let (project_path, worktree_snapshot) = project.read_with(cx, |project, cx| {
                 let project_path = project.find_project_path(&path, cx).ok_or_else(|| {
                     format!("Couldn't delete {path} because that path isn't in this project.")

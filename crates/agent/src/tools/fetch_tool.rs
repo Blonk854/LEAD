@@ -1,28 +1,25 @@
-use std::rc::Rc;
 use std::sync::Arc;
-use std::{borrow::Cow, cell::RefCell};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use agent_client_protocol::schema as acp;
-use anyhow::{Context as _, Result, bail};
-use futures::{AsyncReadExt as _, FutureExt as _};
+use anyhow::Result;
+use futures::FutureExt as _;
 use gpui::{App, AppContext as _, Task};
-use html_to_markdown::{TagHandler, convert_html_to_markdown, markdown};
-use http_client::{AsyncBody, HttpClientWithUrl};
+use http_client::HttpClientWithUrl;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use settings::Settings as _;
 use ui::SharedString;
 use util::markdown::{MarkdownEscaped, MarkdownInlineCode};
+use web_research::{FetchOutcome, PageFetcher};
 
-use crate::{AgentTool, ToolCallEventStream, ToolInput};
+use crate::{
+    AgentTool, BrowsePageTool, ToolCallEventStream, ToolInput, ToolPermissionContext,
+    full_access_enabled,
+};
+use super::browse_page_tool::web_research_config_from_settings;
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
-enum ContentType {
-    Html,
-    Plaintext,
-    Json,
-}
-
-/// Fetches a URL and returns the content as Markdown.
+/// Fetches a URL and returns the content as Markdown inside an untrusted envelope.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct FetchToolInput {
     /// The URL to fetch.
@@ -36,81 +33,6 @@ pub struct FetchTool {
 impl FetchTool {
     pub fn new(http_client: Arc<HttpClientWithUrl>) -> Self {
         Self { http_client }
-    }
-
-    async fn build_message(http_client: Arc<HttpClientWithUrl>, url: &str) -> Result<String> {
-        let url = if !url.starts_with("https://") && !url.starts_with("http://") {
-            Cow::Owned(format!("https://{url}"))
-        } else {
-            Cow::Borrowed(url)
-        };
-
-        let mut response = http_client.get(&url, AsyncBody::default(), true).await?;
-
-        let mut body = Vec::new();
-        response
-            .body_mut()
-            .read_to_end(&mut body)
-            .await
-            .context("error reading response body")?;
-
-        if response.status().is_client_error() {
-            let text = String::from_utf8_lossy(body.as_slice());
-            bail!(
-                "status error {}, response: {text:?}",
-                response.status().as_u16()
-            );
-        }
-
-        let Some(content_type) = response.headers().get("content-type") else {
-            bail!("missing Content-Type header");
-        };
-        let content_type = content_type
-            .to_str()
-            .context("invalid Content-Type header")?;
-
-        let content_type = if content_type.starts_with("text/plain") {
-            ContentType::Plaintext
-        } else if content_type.starts_with("application/json") {
-            ContentType::Json
-        } else {
-            ContentType::Html
-        };
-
-        match content_type {
-            ContentType::Html => {
-                let mut handlers: Vec<TagHandler> = vec![
-                    Rc::new(RefCell::new(markdown::WebpageChromeRemover)),
-                    Rc::new(RefCell::new(markdown::ParagraphHandler)),
-                    Rc::new(RefCell::new(markdown::HeadingHandler)),
-                    Rc::new(RefCell::new(markdown::ListHandler)),
-                    Rc::new(RefCell::new(markdown::TableHandler::new())),
-                    Rc::new(RefCell::new(markdown::StyledTextHandler)),
-                ];
-                if url.contains("wikipedia.org") {
-                    use html_to_markdown::structure::wikipedia;
-
-                    handlers.push(Rc::new(RefCell::new(wikipedia::WikipediaChromeRemover)));
-                    handlers.push(Rc::new(RefCell::new(wikipedia::WikipediaInfoboxHandler)));
-                    handlers.push(Rc::new(
-                        RefCell::new(wikipedia::WikipediaCodeHandler::new()),
-                    ));
-                } else {
-                    handlers.push(Rc::new(RefCell::new(markdown::CodeHandler)));
-                }
-
-                convert_html_to_markdown(&body[..], &mut handlers)
-            }
-            ContentType::Plaintext => Ok(std::str::from_utf8(&body)?.to_owned()),
-            ContentType::Json => {
-                let json: serde_json::Value = serde_json::from_slice(&body)?;
-
-                Ok(format!(
-                    "```json\n{}\n```",
-                    serde_json::to_string_pretty(&json)?
-                ))
-            }
-        }
     }
 }
 
@@ -156,21 +78,90 @@ impl AgentTool for FetchTool {
                 )
             });
 
-            let fetch_task = cx.background_spawn({
-                let http_client = http_client.clone();
-                let url = input.url.clone();
-                async move {
-                    authorize.await?;
-                    Self::build_message(http_client, &url).await
-                }
+            let settings = cx.update(|cx| agent_settings::AgentSettings::get_global(cx).clone());
+            let config = web_research_config_from_settings(&settings.web_research);
+            // HTTP path never auto-enables browser; escalate is gated below.
+            let mut http_config = config.clone();
+            http_config.browser_fallback_enabled = false;
+
+            let url = input.url.clone();
+            let http_client_for_fetch = http_client.clone();
+            let fetch_task = cx.background_spawn(async move {
+                authorize.await.map_err(|error| error.to_string())?;
+                let fetcher = PageFetcher::new(http_client_for_fetch, http_config);
+                fetcher.fetch(&url).await.map_err(|error| error.to_string())
             });
 
-            let text = futures::select! {
-                result = fetch_task.fuse() => result.map_err(|e| e.to_string())?,
+            let outcome = futures::select! {
+                result = fetch_task.fuse() => result?,
                 _ = event_stream.cancelled_by_user().fuse() => {
                     return Err("Fetch cancelled by user".to_string());
                 }
             };
+
+            let text = match outcome {
+                FetchOutcome::Fetched(page) => page.model_output(),
+                FetchOutcome::NeedsBrowser { reason, url } => {
+                    if !settings.web_research.browser_fallback_enabled {
+                        return Err(format!(
+                            "needs_browser: {reason} (url={url}). Enable agent.web_research.browser_fallback_enabled and Unleashed to render with the isolated system browser."
+                        ));
+                    }
+                    if !cx.update(|cx| full_access_enabled(cx)) {
+                        return Err(format!(
+                            "needs_browser: {reason} (url={url}). Unleashed is required for isolated browser fallback."
+                        ));
+                    }
+
+                    let browse_authorize = cx.update(|cx| {
+                        event_stream.authorize(
+                            format!(
+                                "Browse {} in isolated browser (HTTP extract failed)",
+                                MarkdownInlineCode(&url)
+                            ),
+                            ToolPermissionContext::new(
+                                BrowsePageTool::NAME,
+                                vec![url.clone()],
+                            ),
+                            cx,
+                        )
+                    });
+                    browse_authorize
+                        .await
+                        .map_err(|error| error.to_string())?;
+
+                    event_stream.update_fields(
+                        acp::ToolCallUpdateFields::new()
+                            .title(format!("Browsing {}…", MarkdownEscaped(&url))),
+                    );
+
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    let cancel_flag = cancel.clone();
+                    let browse_url = url.clone();
+                    let browse = cx.background_spawn({
+                        let http_client = http_client.clone();
+                        let mut config = config;
+                        config.browser_fallback_enabled = true;
+                        async move {
+                            let fetcher = PageFetcher::new(http_client, config);
+                            fetcher
+                                .fetch_via_browser(&browse_url, &browse_url, Some(cancel))
+                                .await
+                                .map(|page| page.model_output())
+                                .map_err(|error| error.to_string())
+                        }
+                    });
+
+                    futures::select! {
+                        result = browse.fuse() => result?,
+                        _ = event_stream.cancelled_by_user().fuse() => {
+                            cancel_flag.store(true, Ordering::SeqCst);
+                            return Err("Fetch cancelled by user".to_string());
+                        }
+                    }
+                }
+            };
+
             if text.trim().is_empty() {
                 return Err("no textual content found".to_string());
             }

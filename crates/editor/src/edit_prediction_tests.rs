@@ -503,17 +503,17 @@ async fn test_edit_prediction_jump_disabled_for_non_zed_providers(cx: &mut gpui:
 
     cx.update_editor(|editor, window, cx| editor.update_visible_edit_prediction(window, cx));
 
-    // For non-Zed providers, there should be no move completion (jump functionality disabled)
+    // For non-LEAD providers, there should be no move completion (jump functionality disabled)
     cx.editor(|editor, _, _| {
         if let Some(completion_state) = &editor.active_edit_prediction {
             // Should be an Edit prediction, not a Move prediction
             match &completion_state.completion {
                 EditPrediction::Edit { .. } => {
-                    // This is expected for non-Zed providers
+                    // This is expected for non-LEAD providers
                 }
                 EditPrediction::MoveWithin { .. } | EditPrediction::MoveOutside { .. } => {
                     panic!(
-                        "Non-Zed providers should not show Move predictions (jump functionality)"
+                        "Non-LEAD providers should not show Move predictions (jump functionality)"
                     );
                 }
             }
@@ -1824,11 +1824,11 @@ impl FakeNonZedEditPredictionDelegate {
 
 impl EditPredictionDelegate for FakeNonZedEditPredictionDelegate {
     fn name() -> &'static str {
-        "fake-non-zed-provider"
+        "fake-non-LEAD-provider"
     }
 
     fn display_name() -> &'static str {
-        "Fake Non-Zed Provider"
+        "Fake Non-LEAD Provider"
     }
 
     fn show_predictions_in_menu() -> bool {

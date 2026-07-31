@@ -13,7 +13,7 @@ pub struct AudioSettings {
     /// loud you sound to others.
     ///
     /// Recommended: off (default)
-    /// Microphones are too quite in zed, until everyone is on experimental
+    /// Microphones are too quite in LEAD, until everyone is on experimental
     /// audio and has auto speaker volume on this will make you very loud
     /// compared to other speakers.
     pub auto_microphone_volume: bool,
@@ -23,7 +23,7 @@ pub struct AudioSettings {
     pub input_audio_device: Option<DeviceId>,
 }
 
-/// Configuration of audio in Zed
+/// Configuration of audio in LEAD
 impl Settings for AudioSettings {
     fn from_settings(content: &settings::SettingsContent) -> Self {
         let audio = &content.audio.as_ref().unwrap();

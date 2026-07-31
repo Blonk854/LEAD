@@ -191,7 +191,7 @@ impl From<BedrockModelMode> for ModelMode {
 /// under in the keychain.
 const AMAZON_AWS_URL: &str = "https://amazonaws.com";
 
-// These environment variables all use a `ZED_` prefix because we don't want to overwrite the user's AWS credentials.
+// These environment variables all use a `zed_` prefix because we don't want to overwrite the user's AWS credentials.
 static ZED_BEDROCK_ACCESS_KEY_ID_VAR: LazyLock<EnvVar> = env_var!("ZED_ACCESS_KEY_ID");
 static ZED_BEDROCK_SECRET_ACCESS_KEY_VAR: LazyLock<EnvVar> = env_var!("ZED_SECRET_ACCESS_KEY");
 static ZED_BEDROCK_SESSION_TOKEN_VAR: LazyLock<EnvVar> = env_var!("ZED_SESSION_TOKEN");
@@ -591,7 +591,7 @@ impl BedrockModel {
                             secret_access_key,
                             session_token,
                             None,
-                            "zed-bedrock-provider",
+                            "LEAD-bedrock-provider",
                         );
                         config_builder = config_builder.credentials_provider(aws_creds);
                     }
@@ -1591,7 +1591,7 @@ impl Render for ConfigurationView {
             .on_action(cx.listener(Self::on_tab))
             .on_action(cx.listener(Self::on_tab_prev))
             .on_action(cx.listener(ConfigurationView::save_credentials))
-            .child(Label::new("To use Zed's agent with Bedrock, you can set a custom authentication strategy through your settings file or use static credentials."))
+            .child(Label::new("To use LEAD's agent with Bedrock, you can set a custom authentication strategy through your settings file or use static credentials."))
             .child(Label::new("But first, to access models on AWS, you need to:").mt_1())
             .child(
                 List::new()
@@ -1673,7 +1673,7 @@ impl ConfigurationView {
             .child(self.session_token_editor.clone())
             .child(
                 Label::new(format!(
-                    "You can also set the {}, {} and {} environment variables (or {} for Bedrock API Key authentication) and restart Zed.",
+                    "You can also set the {}, {} and {} environment variables (or {} for Bedrock API Key authentication) and restart LEAD.",
                     ZED_BEDROCK_ACCESS_KEY_ID_VAR.name,
                     ZED_BEDROCK_SECRET_ACCESS_KEY_VAR.name,
                     ZED_BEDROCK_REGION_VAR.name,

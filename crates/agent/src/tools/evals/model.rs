@@ -52,7 +52,10 @@ pub fn init_eval_app(cx: &mut TestAppContext) {
     });
 }
 
-async fn load_model(selected_model: &SelectedModel, cx: &mut AsyncApp) -> Result<Arc<dyn LanguageModel>> {
+async fn load_model(
+    selected_model: &SelectedModel,
+    cx: &mut AsyncApp,
+) -> Result<Arc<dyn LanguageModel>> {
     let provider_id = selected_model.provider.clone();
     let auth_task = cx.update(|cx| {
         LanguageModelRegistry::read_global(cx)
@@ -71,8 +74,7 @@ async fn load_model(selected_model: &SelectedModel, cx: &mut AsyncApp) -> Result
         models
             .iter()
             .find(|model| {
-                model.provider_id() == selected_model.provider
-                    && model.id() == selected_model.model
+                model.provider_id() == selected_model.provider && model.id() == selected_model.model
             })
             .or_else(|| {
                 models.iter().find(|model| {

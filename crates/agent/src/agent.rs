@@ -4,14 +4,19 @@ mod legacy_thread;
 mod native_agent_server;
 pub mod outline;
 mod pattern_extraction;
+mod project_memory;
+mod rag;
+mod repetition_watchdog;
 mod sandboxing;
 mod templates;
 #[cfg(test)]
 mod tests;
 mod thread;
 mod thread_store;
+mod tool_call_smoke;
 mod tool_permissions;
 mod tools;
+mod worker_pool;
 
 use context_server::ContextServerId;
 pub use db::*;
@@ -19,12 +24,17 @@ pub use goal::*;
 use itertools::Itertools;
 pub use native_agent_server::NativeAgentServer;
 pub use pattern_extraction::*;
+pub use project_memory::*;
 pub use shell_command_parser::extract_commands;
 pub use templates::*;
 pub use thread::*;
 pub use thread_store::*;
+pub use tool_call_smoke::*;
 pub use tool_permissions::*;
 pub use tools::*;
+pub use worker_pool::{
+    WorkerAssignment, acquire_worker, assign_session_worker, increment_worker, release_worker,
+};
 
 use acp_thread::{
     AcpThread, AgentModelId, AgentModelSelector, AgentSessionInfo, AgentSessionList,
@@ -1274,9 +1284,24 @@ impl NativeAgent {
         let registry = LanguageModelRegistry::read_global(cx);
         let default_model = registry.default_model().map(|m| m.model);
         let summarization_model = registry.thread_summary_model(cx).map(|m| m.model);
+        let network_active = agent_settings::AgentSettings::get_global(cx).network_agent_active();
 
         for session in self.sessions.values_mut() {
             session.thread.update(cx, |thread, cx| {
+                if network_active && !thread.is_subagent() {
+                    thread.ensure_network_agent_main_thread_model(cx);
+                    cx.notify();
+                }
+                // Refresh the live model Arc when providers republish model metadata
+                // (e.g. LM Studio loaded_context_length), so context meters stay accurate.
+                if matches!(
+                    event,
+                    language_model::Event::ProviderStateChanged(_)
+                        | language_model::Event::AddedProvider(_)
+                        | language_model::Event::ProvidersChanged
+                ) {
+                    thread.refresh_model_from_registry(cx);
+                }
                 if thread.model().is_none()
                     && let Some(model) = default_model.clone()
                 {
@@ -1907,11 +1932,7 @@ impl NativeAgent {
                             },
                             cx,
                         );
-                        thread.send(
-                            message_id,
-                            [UserMessageContent::Text(objective)],
-                            cx,
-                        )
+                        thread.send(message_id, [UserMessageContent::Text(objective)], cx)
                     })?;
 
                     cx.update(|cx| {
@@ -2074,6 +2095,21 @@ impl NativeAgentConnection {
                             ThreadEvent::AgentText(text) => {
                                 acp_thread.update(cx, |thread, cx| {
                                     thread.push_assistant_content_block(text.into(), false, cx)
+                                })?;
+                            }
+                            ThreadEvent::ReplacePendingAgentText(text) => {
+                                acp_thread.update(cx, |thread, cx| {
+                                    thread.replace_pending_assistant_text(text, cx)
+                                })?;
+                            }
+                            ThreadEvent::ReplacePendingAgentThinking(text) => {
+                                acp_thread.update(cx, |thread, cx| {
+                                    thread.replace_pending_assistant_thinking(text, cx)
+                                })?;
+                            }
+                            ThreadEvent::BeginNewAssistantMessage => {
+                                acp_thread.update(cx, |thread, cx| {
+                                    thread.begin_new_assistant_message(cx)
                                 })?;
                             }
                             ThreadEvent::AgentThinking(text) => {
@@ -2299,6 +2335,30 @@ impl acp_thread::AgentModelSelector for NativeAgentModelSelector {
             ..
         } = agent_settings::language_model_to_selection(&model, favorite.as_ref());
 
+        let settings = agent_settings::AgentSettings::get_global(cx);
+        if settings.network_agent_active() {
+            let provider = model.provider_id().0.to_string();
+            let model_name = model.id().0.to_string();
+            let enable_thinking = enable_thinking && model.supports_thinking();
+            update_settings_file(
+                self.connection.0.read(cx).fs.clone(),
+                cx,
+                move |settings, _cx| {
+                    settings
+                        .agent
+                        .get_or_insert_default()
+                        .set_model(LanguageModelSelection {
+                            provider: provider.into(),
+                            model: model_name,
+                            enable_thinking,
+                            effort,
+                            speed,
+                        });
+                },
+            );
+            return Task::ready(Ok(()));
+        }
+
         thread.update(cx, |thread, cx| {
             thread.set_model(model.clone(), cx);
             thread.set_thinking_effort(effort.clone(), cx);
@@ -2423,7 +2483,11 @@ fn model_id_to_selection(model_id: &AgentModelId, cx: &App) -> LanguageModelSele
     agent_settings::language_model_to_selection(&resolved, current_user_selection.as_ref())
 }
 
+/// Stable agent id persisted in thread metadata. Do not rename.
 pub static ZED_AGENT_ID: LazyLock<AgentId> = LazyLock::new(|| AgentId::new("Zed Agent"));
+
+/// User-visible name for the native built-in agent.
+pub const NATIVE_AGENT_DISPLAY_NAME: &str = "LEAD Agent";
 
 impl acp_thread::AgentConnection for NativeAgentConnection {
     fn agent_id(&self) -> AgentId {
@@ -2431,7 +2495,7 @@ impl acp_thread::AgentConnection for NativeAgentConnection {
     }
 
     fn telemetry_id(&self) -> SharedString {
-        "zed".into()
+        "LEAD".into()
     }
 
     fn new_session(
@@ -2890,6 +2954,8 @@ impl NativeThreadEnvironment {
             ));
         }
 
+        Thread::validate_hybrid_subagent_model(cx)?;
+
         let subagent_thread: Entity<Thread> = cx.new(|cx| {
             let mut thread = Thread::new_subagent(&parent_thread_entity, cx);
             thread.set_title(label.into(), cx);
@@ -2897,6 +2963,28 @@ impl NativeThreadEnvironment {
         });
 
         let session_id = subagent_thread.read(cx).id().clone();
+
+        let settings = agent_settings::AgentSettings::get_global(cx);
+        if settings.network_agent_active() && settings.network_agent.workers.is_active() {
+            if let Some(assignment) = acquire_worker(
+                &settings.network_agent.workers,
+                &settings.default_model,
+                None,
+            ) {
+                let worker_id = assignment.worker_id.clone();
+                subagent_thread.update(cx, |thread, cx| {
+                    thread.inherits_parent_model_settings = false;
+                    thread.apply_model_selection(&assignment.model, cx);
+                    thread.set_assigned_worker_id(worker_id.clone(), cx);
+                });
+                assign_session_worker(session_id.0.as_ref(), &worker_id);
+            } else if let Some(subagent_model) = settings.effective_subagent_model() {
+                subagent_thread.update(cx, |thread, cx| {
+                    thread.inherits_parent_model_settings = false;
+                    thread.apply_model_selection(&subagent_model, cx);
+                });
+            }
+        }
 
         let acp_thread = self
             .agent
@@ -3160,6 +3248,12 @@ impl SubagentHandle for NativeSubagentHandle {
                         parent_thread.register_running_subagent(thread.downgrade())
                     })
                     .ok();
+
+                thread.read_with(cx, |thread, _| {
+                    if let Some(worker_id) = thread.assigned_worker_id() {
+                        increment_worker(worker_id);
+                    }
+                });
 
                 let task = acp_thread.update(cx, |acp_thread, cx| {
                     acp_thread.send(vec![message.into()], cx)
@@ -3707,17 +3801,17 @@ mod internal_tests {
         // Hand-typed `/global:<name>` is not aliased to the global
         // source; it looks for a worktree literally named `global`.
         assert!(!global.matches_scope("global"));
-        assert!(!global.matches_scope("zed"));
+        assert!(!global.matches_scope("LEAD"));
 
         let project = SkillSource::ProjectLocal {
             worktree_id: SkillScopeId(1),
-            worktree_root_name: "zed".into(),
+            worktree_root_name: "LEAD".into(),
         };
         // Project-local skills are scoped by their worktree root name
         // so multiple open worktrees with same-named skills can each
         // be addressed unambiguously.
-        assert_eq!(project.scope_prefix(), "zed");
-        assert!(project.matches_scope("zed"));
+        assert_eq!(project.scope_prefix(), "LEAD");
+        assert!(project.matches_scope("LEAD"));
         // The empty scope is reserved for globals.
         assert!(!project.matches_scope(""));
         // An unrelated worktree name (or MCP server name) must not

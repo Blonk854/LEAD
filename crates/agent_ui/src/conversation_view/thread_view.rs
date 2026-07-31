@@ -2,9 +2,11 @@ use crate::{
     DEFAULT_THREAD_TITLE, PromptInputMode, SelectPermissionGranularity,
     agent_configuration::configure_context_server_modal::default_markdown_style,
     goal_mode_selector::apply_goal_mode_to_contents,
-    network_agent::{NetworkAgentModal, set_network_agent_enabled},
+    network_agent::{NetworkAgentModal, resolve_model_selection, set_network_agent_enabled},
+    network_agent_health::{self, ModelHealth},
     open_abs_path_at_point,
     thread_metadata_store::{ThreadId, ThreadMetadataStore},
+    tool_call_smoke_modal::ToolCallSmokeModal,
 };
 use agent::{GoalCommand, GoalStatus};
 use agent_client_protocol::schema as acp;
@@ -27,8 +29,9 @@ use gpui::TaskExt;
 use heapless::Vec as ArrayVec;
 use language_model::{
     FastModeConfirmation, LanguageModelEffortLevel, LanguageModelId, LanguageModelProviderId,
-    LanguageModelRegistry, SelectedModel, Speed,
+    LanguageModelRegistry, Speed,
 };
+use language_models::AllLanguageModelSettings;
 use settings::update_settings_file;
 use ui::{ButtonLike, SpinnerLabel, SpinnerVariant, SplitButton, SplitButtonStyle, Tab};
 use workspace::notifications::NotificationId;
@@ -459,7 +462,7 @@ mod numbered_code_block_tests {
     #[test]
     fn parses_cat_numbered_markdown_code_block() {
         let parsed = parse_cat_numbered_markdown_code_block(
-            "```rs zed/crates/example.rs\n     2\tfn main() {\n     3\t    println!(\"hi\");\n     4\t}\n```\n",
+            "```rs LEAD/crates/example.rs\n     2\tfn main() {\n     3\t    println!(\"hi\");\n     4\t}\n```\n",
         )
         .expect("cat-numbered block should parse");
 
@@ -1681,10 +1684,7 @@ impl ThreadView {
         let Some(native_thread) = self.as_native_thread(cx) else {
             return;
         };
-        if !native_thread
-            .read(cx)
-            .should_roll_over(context_fraction)
-        {
+        if !native_thread.read(cx).should_roll_over(context_fraction) {
             return;
         }
 
@@ -1758,7 +1758,7 @@ impl ThreadView {
                 ThreadError::PaymentRequired => (
                     "payment_required",
                     None,
-                    "You reached your free usage limit. Upgrade to Zed Pro for more prompts."
+                    "You reached your free usage limit. Upgrade to LEAD Pro for more prompts."
                         .into(),
                 ),
                 ThreadError::Refusal => {
@@ -3075,7 +3075,11 @@ impl ThreadView {
                 let info = tool_call.subagent_session_info.as_ref()?;
                 let summary_text = tool_call.label.read(cx).source().to_string();
                 let subagent_summary = if summary_text.is_empty() {
-                    SharedString::from("Subagent")
+                    if agent_settings::AgentSettings::get_global(cx).network_agent_active() {
+                        SharedString::from("Local worker")
+                    } else {
+                        SharedString::from("Subagent")
+                    }
                 } else {
                     SharedString::from(summary_text)
                 };
@@ -4033,6 +4037,7 @@ impl ThreadView {
                                     .child(self.render_add_context_button(cx))
                                     .child(self.render_follow_toggle(cx))
                                     .children(self.render_network_agent_control(cx))
+                                    .children(self.render_tool_call_smoke_control(window, cx))
                                     .children(self.render_fast_mode_control(cx))
                                     .children(self.render_thinking_control(cx)),
                             )
@@ -4495,94 +4500,103 @@ impl ThreadView {
                     move |window, cx| {
                         let weak_self = weak_self.clone();
                         let thread = thread.clone();
-                        Some(ContextMenu::build(window, cx, move |mut menu, _window, cx| {
-                            for mode in [PromptInputMode::Chat, PromptInputMode::Goal] {
-                                let is_selected = mode == prompt_input_mode;
-                                menu.push_item(
-                                    ContextMenuEntry::new(mode.label())
-                                        .toggleable(IconPosition::End, is_selected)
-                                        .handler({
-                                            let weak_self = weak_self.clone();
+                        Some(ContextMenu::build(
+                            window,
+                            cx,
+                            move |mut menu, _window, cx| {
+                                for mode in [PromptInputMode::Chat, PromptInputMode::Goal] {
+                                    let is_selected = mode == prompt_input_mode;
+                                    menu.push_item(
+                                        ContextMenuEntry::new(mode.label())
+                                            .toggleable(IconPosition::End, is_selected)
+                                            .handler({
+                                                let weak_self = weak_self.clone();
+                                                move |_window, cx| {
+                                                    weak_self
+                                                        .update(cx, |this, cx| {
+                                                            this.set_prompt_input_mode(mode, cx);
+                                                        })
+                                                        .ok();
+                                                }
+                                            }),
+                                    );
+                                }
+
+                                let Ok(Some(goal)) =
+                                    thread.read_with(cx, |thread, _| thread.goal().cloned())
+                                else {
+                                    return menu;
+                                };
+
+                                let status_summary = goal.status_summary();
+                                let goal_status = goal.status;
+
+                                menu = menu.separator().custom_row({
+                                    let status_summary = status_summary.clone();
+                                    move |_window, _cx| {
+                                        div()
+                                            .max_w(px(240.))
+                                            .child(
+                                                Label::new(status_summary.clone())
+                                                    .size(LabelSize::Small),
+                                            )
+                                            .into_any_element()
+                                    }
+                                });
+
+                                if goal_status == GoalStatus::Active {
+                                    menu =
+                                        menu.item(ContextMenuEntry::new("Pause Goal").handler({
+                                            let thread = thread.clone();
                                             move |_window, cx| {
-                                                weak_self
-                                                    .update(cx, |this, cx| {
-                                                        this.set_prompt_input_mode(mode, cx);
+                                                thread
+                                                    .update(cx, |thread, cx| {
+                                                        thread.apply_goal_command(
+                                                            GoalCommand::Pause,
+                                                            cx,
+                                                        );
                                                     })
                                                     .ok();
                                             }
-                                        }),
-                                );
-                            }
-
-                            let Ok(Some(goal)) =
-                                thread.read_with(cx, |thread, _| thread.goal().cloned())
-                            else {
-                                return menu;
-                            };
-
-                            let status_summary = goal.status_summary();
-                            let goal_status = goal.status;
-
-                            menu = menu.separator().custom_row({
-                                let status_summary = status_summary.clone();
-                                move |_window, _cx| {
-                                    div()
-                                        .max_w(px(240.))
-                                        .child(
-                                            Label::new(status_summary.clone())
-                                                .size(LabelSize::Small),
-                                        )
-                                        .into_any_element()
+                                        }));
+                                } else if goal_status == GoalStatus::Paused {
+                                    menu =
+                                        menu.item(ContextMenuEntry::new("Resume Goal").handler({
+                                            let thread = thread.clone();
+                                            move |_window, cx| {
+                                                thread
+                                                    .update(cx, |thread, cx| {
+                                                        thread.apply_goal_command(
+                                                            GoalCommand::Resume,
+                                                            cx,
+                                                        );
+                                                    })
+                                                    .ok();
+                                            }
+                                        }));
                                 }
-                            });
 
-                            if goal_status == GoalStatus::Active {
-                                menu = menu.item(ContextMenuEntry::new("Pause Goal").handler({
+                                menu.item(ContextMenuEntry::new("Clear Goal").handler({
                                     let thread = thread.clone();
+                                    let weak_self = weak_self.clone();
                                     move |_window, cx| {
                                         thread
                                             .update(cx, |thread, cx| {
-                                                thread.apply_goal_command(
-                                                    GoalCommand::Pause,
+                                                thread.apply_goal_command(GoalCommand::Clear, cx);
+                                            })
+                                            .ok();
+                                        weak_self
+                                            .update(cx, |this, cx| {
+                                                this.set_prompt_input_mode(
+                                                    PromptInputMode::Chat,
                                                     cx,
                                                 );
                                             })
                                             .ok();
                                     }
-                                }));
-                            } else if goal_status == GoalStatus::Paused {
-                                menu = menu.item(ContextMenuEntry::new("Resume Goal").handler({
-                                    let thread = thread.clone();
-                                    move |_window, cx| {
-                                        thread
-                                            .update(cx, |thread, cx| {
-                                                thread.apply_goal_command(
-                                                    GoalCommand::Resume,
-                                                    cx,
-                                                );
-                                            })
-                                            .ok();
-                                    }
-                                }));
-                            }
-
-                            menu.item(ContextMenuEntry::new("Clear Goal").handler({
-                                let thread = thread.clone();
-                                let weak_self = weak_self.clone();
-                                move |_window, cx| {
-                                    thread
-                                        .update(cx, |thread, cx| {
-                                            thread.apply_goal_command(GoalCommand::Clear, cx);
-                                        })
-                                        .ok();
-                                    weak_self
-                                        .update(cx, |this, cx| {
-                                            this.set_prompt_input_mode(PromptInputMode::Chat, cx);
-                                        })
-                                        .ok();
-                                }
-                            }))
-                        }))
+                                }))
+                            },
+                        ))
                     }
                 })
                 .into_any_element(),
@@ -4593,36 +4607,88 @@ impl ThreadView {
     /// thread at the appropriate model so the change takes effect right away.
     fn toggle_network_agent(&mut self, enabled: bool, cx: &mut Context<Self>) {
         set_network_agent_enabled(enabled, cx);
+        crate::update_active_language_model_from_settings(cx);
 
-        let settings = agent_settings::AgentSettings::get_global(cx);
-        let selection = if enabled {
-            settings.network_agent.model.clone().map(|model| SelectedModel {
-                provider: LanguageModelProviderId::new(
-                    agent_settings::AgentSettings::NETWORK_AGENT_PROVIDER_ID,
-                ),
-                model: LanguageModelId::from(model),
-            })
-        } else {
-            settings.default_model.as_ref().map(|selection| SelectedModel {
-                provider: LanguageModelProviderId::from(selection.provider.0.clone()),
-                model: LanguageModelId::from(selection.model.clone()),
-            })
-        };
-
-        if let Some(selection) = selection {
-            let configured = LanguageModelRegistry::global(cx)
-                .update(cx, |registry, cx| registry.select_model(&selection, cx));
-            if let (Some(configured), Some(thread)) = (configured, self.as_native_thread(cx)) {
-                thread.update(cx, |thread, cx| thread.set_model(configured.model, cx));
+        if enabled {
+            if let Some(thread) = self.as_native_thread(cx) {
+                thread.update(cx, |thread, cx| {
+                    thread.ensure_network_agent_main_thread_model(cx);
+                    cx.notify();
+                });
+            }
+            self.suggest_hybrid_profile_if_needed(cx);
+        } else if let Some(selection) = agent_settings::AgentSettings::get_global(cx)
+            .default_model
+            .clone()
+        {
+            if let (Some(model), Some(thread)) = (
+                resolve_model_selection(&selection.provider.0, &selection.model, cx),
+                self.as_native_thread(cx),
+            ) {
+                thread.update(cx, |thread, cx| thread.set_model(model, cx));
             }
         }
         cx.notify();
+    }
+
+    fn suggest_hybrid_profile_if_needed(&self, cx: &mut Context<Self>) {
+        let settings = agent_settings::AgentSettings::get_global(cx);
+        let profile_id = self
+            .as_native_thread(cx)
+            .map(|thread| thread.read(cx).profile().clone())
+            .unwrap_or_else(|| settings.default_profile.clone());
+        let Some(profile) = settings.profiles.get(&profile_id) else {
+            return;
+        };
+        if profile.is_tool_enabled("spawn_agent") {
+            return;
+        }
+
+        struct HybridProfileToast;
+        self.workspace
+            .update(cx, |workspace, cx| {
+                workspace.show_toast(
+                    Toast::new(
+                        NotificationId::unique::<HybridProfileToast>(),
+                        "Hybrid mode works best with the hybrid or write profile (includes spawn_agent).",
+                    )
+                    .on_click("Use hybrid profile", {
+                        let workspace = self.workspace.clone();
+                        move |_window, cx| {
+                            let fs = <dyn fs::Fs>::global(cx);
+                            update_settings_file(fs, cx, move |settings, _cx| {
+                                settings
+                                    .agent
+                                    .get_or_insert_default()
+                                    .default_profile = Some("hybrid".into());
+                            });
+                            workspace
+                                .update(cx, |workspace, cx| {
+                                    workspace.show_toast(
+                                        Toast::new(
+                                            NotificationId::unique::<HybridProfileToast>(),
+                                            "Default profile set to hybrid.",
+                                        ),
+                                        cx,
+                                    );
+                                })
+                                .ok();
+                        }
+                    }),
+                    cx,
+                );
+            })
+            .ok();
     }
 
     fn render_network_agent_control(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let settings = agent_settings::AgentSettings::get_global(cx);
         let configured = settings.network_agent.model.clone();
         let enabled = settings.network_agent.enabled && configured.is_some();
+        let endpoint = AllLanguageModelSettings::get_global(cx)
+            .openai_compatible
+            .get(agent_settings::AgentSettings::NETWORK_AGENT_PROVIDER_ID)
+            .map(|provider| provider.api_url.clone());
 
         let icon = if self.network_agent_menu_handle.is_deployed() {
             IconName::ChevronUp
@@ -4635,11 +4701,16 @@ impl ThreadView {
         let trigger_button = Button::new("network-agent-trigger", "Network")
             .label_size(LabelSize::Small)
             .color(color)
-            .start_icon(Icon::new(IconName::Server).size(IconSize::XSmall).color(color))
+            .start_icon(
+                Icon::new(IconName::Server)
+                    .size(IconSize::XSmall)
+                    .color(color),
+            )
             .end_icon(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted));
 
         let workspace = self.workspace.clone();
         let weak_self = cx.weak_entity();
+        let endpoint_for_menu = endpoint.clone();
 
         Some(
             PopoverMenu::new("network-agent-selector")
@@ -4658,10 +4729,26 @@ impl ThreadView {
                 .menu({
                     let workspace = workspace.clone();
                     let weak_self = weak_self.clone();
+                    let endpoint = endpoint_for_menu.clone();
+                    let local_worker = settings
+                        .default_model
+                        .as_ref()
+                        .map(|model| format!("{}/{}", model.provider.0, model.model));
+                    let effective_subagent = settings.effective_subagent_model();
+                    let local_worker_model = effective_subagent.as_ref().and_then(|selection| {
+                        resolve_model_selection(&selection.provider.0, &selection.model, cx)
+                    });
+                    let (orchestrator_health, local_health) =
+                        network_agent_health::check_hybrid_models_in_registry(cx);
                     move |window, cx| {
                         let workspace = workspace.clone();
                         let weak_self = weak_self.clone();
                         let configured = configured.clone();
+                        let endpoint = endpoint.clone();
+                        let local_worker = local_worker.clone();
+                        let local_worker_model = local_worker_model.clone();
+                        let orchestrator_health = orchestrator_health.clone();
+                        let local_health = local_health.clone();
                         Some(ContextMenu::build(window, cx, move |mut menu, _window, _cx| {
                             let has_config = configured.is_some();
                             menu = menu.item(
@@ -4681,12 +4768,36 @@ impl ThreadView {
                             );
 
                             menu = menu.separator().custom_row(move |_window, _cx| {
-                                let label = match configured.clone() {
-                                    Some(model) => format!("Model: {model}"),
-                                    None => "No network model configured".to_string(),
-                                };
+                                let mut lines = Vec::new();
+                                if enabled {
+                                    if let Some(model) = configured.clone() {
+                                        lines.push(format!("Orchestrator: {model}"));
+                                    }
+                                    if let Some(worker) = local_worker.clone() {
+                                        lines.push(format!("Local worker: {worker}"));
+                                    }
+                                    lines.push(format!(
+                                        "Orchestrator status: {}",
+                                        orchestrator_health.label()
+                                    ));
+                                    if local_health != ModelHealth::Unknown {
+                                        lines.push(format!(
+                                            "Local worker status: {}",
+                                            local_health.label()
+                                        ));
+                                    }
+                                } else {
+                                    lines.push(match (configured.clone(), endpoint.clone()) {
+                                        (Some(model), Some(endpoint)) => {
+                                            format!("Model: {model}\nEndpoint: {endpoint}")
+                                        }
+                                        (Some(model), None) => format!("Model: {model}"),
+                                        _ => "No network model configured".to_string(),
+                                    });
+                                }
+                                let label = lines.join("\n");
                                 div()
-                                    .max_w(px(240.))
+                                    .max_w(px(280.))
                                     .child(
                                         Label::new(label)
                                             .size(LabelSize::Small)
@@ -4694,6 +4805,28 @@ impl ThreadView {
                                     )
                                     .into_any_element()
                             });
+
+                            if enabled {
+                                if let Some(local_model) = local_worker_model {
+                                    menu = menu.item(
+                                        ContextMenuEntry::new("Test local worker").handler({
+                                            let workspace = workspace.clone();
+                                            move |window, cx| {
+                                                workspace
+                                                    .update(cx, |workspace, cx| {
+                                                        ToolCallSmokeModal::toggle(
+                                                            workspace,
+                                                            local_model.clone(),
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    })
+                                                    .ok();
+                                            }
+                                        }),
+                                    );
+                                }
+                            }
 
                             menu.separator().item(
                                 ContextMenuEntry::new("Configure Network Agent…").handler({
@@ -4710,6 +4843,56 @@ impl ThreadView {
                         }))
                     }
                 })
+                .into_any_element(),
+        )
+    }
+
+    fn render_tool_call_smoke_control(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let thread = self.as_native_thread(cx)?.read(cx);
+        if !thread.is_turn_complete() {
+            return None;
+        }
+
+        let agent_settings = agent_settings::AgentSettings::get_global(cx);
+        let network_agent_active = agent_settings.network_agent_active();
+        let network_selection = if network_agent_active {
+            agent_settings.effective_default_model()
+        } else {
+            None
+        };
+        let thread_model = thread.model().cloned();
+        let model = network_selection
+            .and_then(|selection| {
+                resolve_model_selection(&selection.provider.0, &selection.model, cx)
+            })
+            .or(thread_model);
+
+        let model = model?;
+
+        let model_label = format!("{}/{}", model.provider_id().0, model.id().0);
+        let tooltip = if network_agent_active {
+            format!("Test tool calling on the network model ({model_label}) — 3 smoke prompts")
+        } else {
+            "Test tool calling on the current model (runs 3 smoke prompts)".to_string()
+        };
+
+        Some(
+            IconButton::new("tool-call-smoke", IconName::ToolHammer)
+                .icon_size(IconSize::Small)
+                .icon_color(Color::Muted)
+                .tooltip(Tooltip::text(tooltip))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    let model = model.clone();
+                    this.workspace
+                        .update(cx, |workspace, cx| {
+                            ToolCallSmokeModal::toggle(workspace, model, window, cx);
+                        })
+                        .ok();
+                }))
                 .into_any_element(),
         )
     }
@@ -6179,7 +6362,7 @@ impl ThreadView {
 
             let tooltip_meta = || {
                 SharedString::new(
-                    "Rating the thread sends all of your current conversation to the Zed team.",
+                    "Rating the thread sends all of your current conversation to the LEAD team.",
                 )
             };
 
@@ -9622,7 +9805,7 @@ impl ThreadView {
             ThreadError::RateLimitExceeded { provider } => self.render_error_callout(
                 "Rate Limit Reached",
                 format!(
-                    "{provider}'s rate limit was reached. Zed will retry automatically. \
+                    "{provider}'s rate limit was reached. LEAD will retry automatically. \
                     You can also wait a moment and try again."
                 )
                 .into(),
@@ -9633,7 +9816,7 @@ impl ThreadView {
             ThreadError::ServerOverloaded { provider } => self.render_error_callout(
                 "Provider Unavailable",
                 format!(
-                    "{provider}'s servers are temporarily unavailable. Zed will retry \
+                    "{provider}'s servers are temporarily unavailable. LEAD will retry \
                     automatically. If the problem persists, check the provider's status page."
                 )
                 .into(),
@@ -9656,7 +9839,7 @@ impl ThreadView {
             ThreadError::StreamError { provider } => self.render_error_callout(
                 "Connection Interrupted",
                 format!(
-                    "The connection to {provider}'s API was interrupted. Zed will retry \
+                    "The connection to {provider}'s API was interrupted. LEAD will retry \
                     automatically. If the problem persists, check your network connection."
                 )
                 .into(),
@@ -9715,7 +9898,7 @@ impl ThreadView {
                 "API Error",
                 format!(
                     "{provider}'s API returned an unexpected error. \
-                    If the problem persists, try switching models or restarting Zed."
+                    If the problem persists, try switching models or restarting LEAD."
                 )
                 .into(),
                 true,
@@ -9766,7 +9949,7 @@ impl ThreadView {
 
     fn render_payment_required_error(&self, cx: &mut Context<Self>) -> Callout {
         const ERROR_MESSAGE: &str =
-            "You reached your free usage limit. Upgrade to Zed Pro for more prompts.";
+            "You reached your free usage limit. Upgrade to LEAD Pro for more prompts.";
 
         Callout::new()
             .severity(Severity::Error)
@@ -9891,7 +10074,7 @@ impl ThreadView {
     }
 
     fn current_model_name(&self, cx: &App) -> SharedString {
-        // For native agent (Zed Agent), use the specific model name (e.g., "Claude 3.5 Sonnet")
+        // For native agent (LEAD Agent), use the specific model name (e.g., "Claude 3.5 Sonnet")
         // For ACP agents, use the agent name (e.g., "Claude Agent", "Gemini CLI")
         // This provides better clarity about what refused the request
         if self.as_native_connection(cx).is_some() {

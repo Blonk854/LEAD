@@ -214,7 +214,7 @@ mod python_locator {
         let adapter = DebugAdapterName("Debugpy".into());
         let build_task = TaskTemplate {
             label: "run module '$ZED_FILE'".into(),
-            command: "$ZED_CUSTOM_PYTHON_ACTIVE_ZED_TOOLCHAIN".into(),
+            command: "$ZED_CUSTOM_PYTHON_ACTIVE_zed_TOOLCHAIN".into(),
             args: vec!["-m".into(), "$ZED_CUSTOM_PYTHON_MODULE_NAME".into()],
             env: Default::default(),
             cwd: Some("$ZED_WORKTREE_ROOT".into()),
@@ -237,7 +237,7 @@ mod python_locator {
             build: None,
             config: json!({
                 "request": "launch",
-                "python": "$ZED_CUSTOM_PYTHON_ACTIVE_ZED_TOOLCHAIN",
+                "python": "$ZED_CUSTOM_PYTHON_ACTIVE_zed_TOOLCHAIN",
                 "args": [],
                 "cwd": "$ZED_WORKTREE_ROOT",
                 "module": "$ZED_CUSTOM_PYTHON_MODULE_NAME",

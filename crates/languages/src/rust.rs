@@ -1346,9 +1346,9 @@ async fn human_readable_package_name(
 }
 
 // For providing local `cargo check -p $pkgid` task, we do not need most of the information we have returned.
-// Output example in the root of Zed project:
+// Output example in the root of LEAD project:
 // ```sh
-// ❯ cargo pkgid zed
+// ❯ cargo pkgid LEAD
 // path+file:///absolute/path/to/project/zed/crates/zed#0.131.0
 // ```
 // Another variant, if a project has a custom package name or hyphen in the name:
@@ -1977,7 +1977,7 @@ mod tests {
             adapter
                 .label_for_symbol(
                     &language::Symbol {
-                        name: "zed".to_string(),
+                        name: "LEAD".to_string(),
                         kind: lsp::SymbolKind::PACKAGE,
                         container_name: None,
                     },
@@ -1985,7 +1985,7 @@ mod tests {
                 )
                 .await,
             Some(CodeLabel::new(
-                "extern crate zed".to_string(),
+                "extern crate LEAD".to_string(),
                 13..16,
                 vec![(0..6, highlight_keyword), (7..12, highlight_keyword),],
             ))
@@ -2087,7 +2087,7 @@ mod tests {
         for (input, expected) in [
             (
                 "path+file:///absolute/path/to/project/zed/crates/zed#0.131.0",
-                "zed",
+                "LEAD",
             ),
             (
                 "path+file:///absolute/path/to/project/custom-package#my-custom-package@0.1.0",
@@ -2106,8 +2106,8 @@ mod tests {
                 "/path/to/zed/src/main.rs",
                 Some((
                     Some(TargetInfo {
-                        package_name: "zed".into(),
-                        target_name: "zed".into(),
+                        package_name: "LEAD".into(),
+                        target_name: "LEAD".into(),
                         required_features: Vec::new(),
                         target_kind: TargetKind::Bin,
                     }),

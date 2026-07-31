@@ -50,6 +50,16 @@ impl ApiKeyState {
         matches!(self.load_status, LoadStatus::Loaded { .. })
     }
 
+    /// Sets an API key in memory without touching the system keychain.
+    pub fn set_in_memory_key(&mut self, url: SharedString, key: impl Into<Arc<str>>) {
+        self.url = url;
+        self.load_status = LoadStatus::Loaded(ApiKey {
+            source: ApiKeySource::SystemKeychain,
+            key: key.into(),
+        });
+        self.load_task = None;
+    }
+
     pub fn env_var_name(&self) -> &SharedString {
         &self.env_var.name
     }

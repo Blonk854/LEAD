@@ -469,8 +469,8 @@ pub struct ArchivedGitWorktree {
     /// the files.
     pub main_repo_path: PathBuf,
     /// Branch that was checked out in the worktree at archive time. `None` if
-    /// the worktree was in detached HEAD state, which isn't supported in Zed, but
-    /// could happen if the user made a detached one outside of Zed.
+    /// the worktree was in detached HEAD state, which isn't supported in LEAD, but
+    /// could happen if the user made a detached one outside of LEAD.
     /// On restore, we try to switch to this branch. If that fails (e.g. it's
     /// checked out elsewhere), we auto-generate a new one.
     pub branch_name: Option<String>,
@@ -3915,11 +3915,11 @@ mod tests {
     #[test]
     fn test_thread_worktree_paths_full_add_then_remove_cycle() {
         // Full scenario from the issue:
-        //   1. Start with linked worktree selectric → zed
+        //   1. Start with linked worktree selectric → LEAD
         //   2. Add cloud
-        //   3. Remove zed
+        //   3. Remove LEAD
 
-        let mut paths = make_worktree_paths(&[("/projects/zed", "/worktrees/selectric/zed")]);
+        let mut paths = make_worktree_paths(&[("/projects/LEAD", "/worktrees/selectric/LEAD")]);
 
         // Step 2: add cloud
         paths.add_path(Path::new("/projects/cloud"), Path::new("/projects/cloud"));
@@ -3928,17 +3928,17 @@ mod tests {
         assert_eq!(
             paths.folder_path_list(),
             &PathList::new(&[
-                Path::new("/worktrees/selectric/zed"),
+                Path::new("/worktrees/selectric/LEAD"),
                 Path::new("/projects/cloud"),
             ])
         );
         assert_eq!(
             paths.main_worktree_path_list(),
-            &PathList::new(&[Path::new("/projects/zed"), Path::new("/projects/cloud"),])
+            &PathList::new(&[Path::new("/projects/LEAD"), Path::new("/projects/cloud"),])
         );
 
-        // Step 3: remove zed
-        paths.remove_main_path(Path::new("/projects/zed"));
+        // Step 3: remove LEAD
+        paths.remove_main_path(Path::new("/projects/LEAD"));
 
         assert_eq!(paths.ordered_pairs().count(), 1);
         assert_eq!(
@@ -3953,16 +3953,16 @@ mod tests {
 
     #[test]
     fn test_thread_worktree_paths_add_is_idempotent() {
-        let mut paths = make_worktree_paths(&[("/projects/zed", "/projects/zed")]);
+        let mut paths = make_worktree_paths(&[("/projects/LEAD", "/projects/LEAD")]);
 
-        paths.add_path(Path::new("/projects/zed"), Path::new("/projects/zed"));
+        paths.add_path(Path::new("/projects/LEAD"), Path::new("/projects/LEAD"));
 
         assert_eq!(paths.ordered_pairs().count(), 1);
     }
 
     #[test]
     fn test_thread_worktree_paths_remove_nonexistent_is_noop() {
-        let mut paths = make_worktree_paths(&[("/projects/zed", "/worktrees/selectric/zed")]);
+        let mut paths = make_worktree_paths(&[("/projects/LEAD", "/worktrees/selectric/LEAD")]);
 
         paths.remove_main_path(Path::new("/projects/nonexistent"));
 
@@ -3972,10 +3972,10 @@ mod tests {
     #[test]
     fn test_thread_worktree_paths_from_path_lists_preserves_association() {
         let folder = PathList::new(&[
-            Path::new("/worktrees/selectric/zed"),
+            Path::new("/worktrees/selectric/LEAD"),
             Path::new("/projects/cloud"),
         ]);
-        let main = PathList::new(&[Path::new("/projects/zed"), Path::new("/projects/cloud")]);
+        let main = PathList::new(&[Path::new("/projects/LEAD"), Path::new("/projects/cloud")]);
 
         let paths = WorktreePaths::from_path_lists(main, folder).unwrap();
 
@@ -3985,8 +3985,8 @@ mod tests {
             .collect();
         assert_eq!(pairs.len(), 2);
         assert!(pairs.contains(&(
-            PathBuf::from("/projects/zed"),
-            PathBuf::from("/worktrees/selectric/zed")
+            PathBuf::from("/projects/LEAD"),
+            PathBuf::from("/worktrees/selectric/LEAD")
         )));
         assert!(pairs.contains(&(
             PathBuf::from("/projects/cloud"),
@@ -4000,8 +4000,8 @@ mod tests {
         // deduplicates because PathList stores unique sorted paths, but
         // ordered_pairs still has both entries.
         let paths = make_worktree_paths(&[
-            ("/projects/zed", "/worktrees/selectric/zed"),
-            ("/projects/zed", "/worktrees/feature/zed"),
+            ("/projects/LEAD", "/worktrees/selectric/LEAD"),
+            ("/projects/LEAD", "/worktrees/feature/LEAD"),
         ]);
 
         // main_worktree_path_list has the duplicate main path twice
@@ -4010,23 +4010,23 @@ mod tests {
         assert_eq!(
             paths.folder_path_list(),
             &PathList::new(&[
-                Path::new("/worktrees/selectric/zed"),
-                Path::new("/worktrees/feature/zed"),
+                Path::new("/worktrees/selectric/LEAD"),
+                Path::new("/worktrees/feature/LEAD"),
             ])
         );
         assert_eq!(
             paths.main_worktree_path_list(),
-            &PathList::new(&[Path::new("/projects/zed"), Path::new("/projects/zed"),])
+            &PathList::new(&[Path::new("/projects/LEAD"), Path::new("/projects/LEAD"),])
         );
     }
 
     #[test]
     fn test_thread_worktree_paths_mismatched_lengths_returns_error() {
         let folder = PathList::new(&[
-            Path::new("/worktrees/selectric/zed"),
+            Path::new("/worktrees/selectric/LEAD"),
             Path::new("/projects/cloud"),
         ]);
-        let main = PathList::new(&[Path::new("/projects/zed")]);
+        let main = PathList::new(&[Path::new("/projects/LEAD")]);
 
         let result = WorktreePaths::from_path_lists(main, folder);
         assert!(result.is_err());

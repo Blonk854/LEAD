@@ -32,6 +32,18 @@ use std::{
 
 const PENDING_TRACES_VAR_NAME: &str = "PENDING_TRACES";
 
+const GPUI_TEST_TIMEOUT_VAR_NAME: &str = "GPUI_TEST_TIMEOUT";
+
+/// Hard limit on how long a test may park without being woken, in seconds.
+/// Overridable via `GPUI_TEST_TIMEOUT` for evals that wait on real network I/O.
+static PARK_HARD_TIMEOUT: std::sync::LazyLock<Duration> = std::sync::LazyLock::new(|| {
+    env::var(GPUI_TEST_TIMEOUT_VAR_NAME)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(15))
+});
+
 pub struct TestScheduler {
     clock: Arc<TestClock>,
     rng: Arc<Mutex<StdRng>>,
@@ -416,8 +428,11 @@ impl TestScheduler {
     fn park(&self, deadline: Option<Instant>) -> bool {
         if self.state.lock().allow_parking {
             let start = Instant::now();
-            // Enforce a hard timeout to prevent tests from hanging indefinitely
-            let hard_deadline = start + Duration::from_secs(15);
+            // Enforce a hard timeout to prevent tests from hanging indefinitely.
+            // Evals that wait on real network I/O (e.g. slow local models) can
+            // override the default via GPUI_TEST_TIMEOUT (in seconds).
+            let hard_timeout = *PARK_HARD_TIMEOUT;
+            let hard_deadline = start + hard_timeout;
 
             // Use the earlier of the provided deadline or the hard timeout deadline
             let effective_deadline = deadline
@@ -432,8 +447,11 @@ impl TestScheduler {
                     // Check if we hit the hard timeout
                     if now >= hard_deadline {
                         panic!(
-                            "Test timed out after 15 seconds while parking. \
-                            This may indicate a deadlock or missing waker.",
+                            "Test timed out after {}s while parking. \
+                            This may indicate a deadlock or missing waker. \
+                            Set {GPUI_TEST_TIMEOUT_VAR_NAME} (seconds) to raise the limit \
+                            for tests that legitimately wait on slow I/O.",
+                            hard_timeout.as_secs(),
                         );
                     }
                     // Hit the provided deadline

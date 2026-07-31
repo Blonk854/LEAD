@@ -58,3 +58,12 @@ crates/docs_preprocessor/actions.json
 
 # NixOS integration test state
 .nixos-test-history
+
+# Local vendor dumps, ConPTY package extract, installer staging, eval logs
+/AGS_SDK-*/
+/AGS_SDK_*.zip
+/Microsoft.Windows.Console.ConPTY*.nupkg
+/conpty/
+/inno/
+/tool-eval-matrix-*.log
+/z_native_web_research_*.plan.md

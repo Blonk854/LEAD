@@ -6308,7 +6308,7 @@ impl Workspace {
 
             let Some(task) = task else {
                 anyhow::bail!(
-                    "failed to construct view from leader (maybe from a different version of zed?)"
+                    "failed to construct view from leader (maybe from a different version of LEAD?)"
                 );
             };
 
@@ -9234,9 +9234,9 @@ pub struct OpenChannelNotesById {
 actions!(
     zed,
     [
-        /// Opens the Zed log file.
+        /// Opens the LEAD log file.
         OpenLog,
-        /// Reveals the Zed log file in the system file manager.
+        /// Reveals the LEAD log file in the system file manager.
         RevealLogInFileManager
     ]
 );
@@ -9450,7 +9450,7 @@ pub fn join_channel(
                         let detail: SharedString = match err.error_code() {
                             ErrorCode::SignedOut => "Please sign in to continue.".into(),
                             ErrorCode::UpgradeRequired => concat!(
-                                "Your are running an unsupported version of Zed. ",
+                                "Your are running an unsupported version of LEAD. ",
                                 "Please update to continue."
                             )
                             .into(),
@@ -9507,7 +9507,7 @@ pub async fn get_any_active_multi_workspace(
         })
         .await?;
     }
-    activate_any_workspace_window(&mut cx).context("could not open zed")
+    activate_any_workspace_window(&mut cx).context("could not open LEAD")
 }
 
 pub fn activate_any_workspace_window(cx: &mut AsyncApp) -> Option<WindowHandle<MultiWorkspace>> {
@@ -9674,7 +9674,7 @@ pub enum WorkspaceMatching {
     /// Match paths against existing worktrees including subdirectories, and
     /// fall back to any existing window if no worktree matched.
     ///
-    /// For example, `zed -a foo/bar` will activate the `bar` workspace if it
+    /// For example, `LEAD -a foo/bar` will activate the `bar` workspace if it
     /// exists, otherwise it will open a new window with `foo/bar` as the root.
     MatchSubdirectory,
 }

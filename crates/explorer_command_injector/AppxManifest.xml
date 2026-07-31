@@ -12,15 +12,15 @@
   xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
   xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
   IgnorableNamespaces="uap uap2 uap3 rescap desktop desktop4 desktop5 desktop6 uap10 com">
-  <!-- TODO: Use Zed's signature here. -->
+  <!-- TODO: Use LEAD's signature here. -->
   <Identity
-    Name="ZedIndustries.Zed"
+    Name="ZedIndustries.LEAD"
     Publisher="CN=Zed Industries Inc, O=Zed Industries Inc, L=Denver, S=Colorado, C=US"
     Version="1.0.0.0" />
   <Properties>
-    <DisplayName>Zed</DisplayName>
+    <DisplayName>LEAD</DisplayName>
 
-    <PublisherDisplayName>Zed Industries</PublisherDisplayName>
+    <PublisherDisplayName>LEAD</PublisherDisplayName>
     <!-- TODO: Use actual icon here. -->
     <Logo>resources\logo_150x150.png</Logo>
     <uap10:AllowExternalContent>true</uap10:AllowExternalContent>
@@ -46,8 +46,8 @@
     <!-- TODO: Use actual icon here. -->
       <uap:VisualElements
         AppListEntry="none"
-        DisplayName="Zed"
-        Description="Zed explorer command injector"
+        DisplayName="LEAD"
+        Description="LEAD explorer command injector"
         BackgroundColor="transparent"
         Square150x150Logo="resources\logo_150x150.png"
         Square44x44Logo="resources\logo_70x70.png">
@@ -68,8 +68,8 @@
         </desktop4:Extension>
         <com:Extension Category="windows.comServer">
           <com:ComServer>
-            <com:SurrogateServer DisplayName="Zed">
-              <com:Class Id="6a1f6b13-3b82-48a1-9e06-7bb0a6d0bffd" Path="zed_explorer_command_injector.dll" ThreadingModel="STA"/>
+            <com:SurrogateServer DisplayName="LEAD">
+              <com:Class Id="6a1f6b13-3b82-48a1-9e06-7bb0a6d0bffd" Path="ZED_explorer_command_injector.dll" ThreadingModel="STA"/>
             </com:SurrogateServer>
           </com:ComServer>
         </com:Extension>

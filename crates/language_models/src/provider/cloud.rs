@@ -361,10 +361,10 @@ impl LanguageModelProvider for CloudLanguageModelProvider {
 
     fn fast_mode_confirmation(&self, _cx: &App) -> Option<FastModeConfirmation> {
         Some(FastModeConfirmation {
-            title: "Enable Fast Mode for Zed?".into(),
+            title: "Enable Fast Mode for LEAD?".into(),
             message: "Fast mode routes requests through the upstream provider's fast mode or priority tier. The \
                 upstream provider's premium per-token pricing applies and is passed through to \
-                your Zed billing."
+                your LEAD billing."
                 .into(),
         })
     }
@@ -384,30 +384,30 @@ impl RenderOnce for ZedAiConfiguration {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let (subscription_text, has_paid_plan) = match self.plan {
             Some(Plan::ZedPro) => (
-                "You have access to Zed's hosted models through your Pro subscription.",
+                "You have access to LEAD's hosted models through your Pro subscription.",
                 true,
             ),
             Some(Plan::ZedProTrial) => (
-                "You have access to Zed's hosted models through your Pro trial.",
+                "You have access to LEAD's hosted models through your Pro trial.",
                 false,
             ),
             Some(Plan::ZedStudent) => (
-                "You have access to Zed's hosted models through your Student subscription.",
+                "You have access to LEAD's hosted models through your Student subscription.",
                 true,
             ),
             Some(Plan::ZedBusiness) => (
                 if self.is_zed_model_provider_enabled {
-                    "You have access to Zed's hosted models through your organization."
+                    "You have access to LEAD's hosted models through your organization."
                 } else {
-                    "Zed's hosted models are disabled by your organization's configuration."
+                    "LEAD's hosted models are disabled by your organization's configuration."
                 },
                 true,
             ),
             Some(Plan::ZedFree) | None => (
                 if self.eligible_for_trial {
-                    "Subscribe for access to Zed's hosted models. Start with a 14 day free trial."
+                    "Subscribe for access to LEAD's hosted models. Start with a 14 day free trial."
                 } else {
-                    "Subscribe for access to Zed's hosted models."
+                    "Subscribe for access to LEAD's hosted models."
                 },
                 false,
             ),
@@ -437,9 +437,9 @@ impl RenderOnce for ZedAiConfiguration {
         if !self.is_connected {
             return v_flex()
                 .gap_2()
-                .child(Label::new("Sign in to have access to Zed's complete agentic experience with hosted models."))
+                .child(Label::new("Sign in to have access to LEAD's complete agentic experience with hosted models."))
                 .child(
-                    Button::new("sign_in", "Sign In to use Zed AI")
+                    Button::new("sign_in", "Sign In to use LEAD AI")
                         .start_icon(Icon::new(IconName::Github).size(IconSize::Small).color(Color::Muted))
                         .full_width()
                         .on_click({
@@ -798,9 +798,9 @@ impl Component for ZedAiConfiguration {
     }
 
     fn description() -> &'static str {
-        "The configuration surface for Zed's hosted AI models, \
+        "The configuration surface for LEAD's hosted AI models, \
         showing the user's connection status, current plan, trial eligibility, \
-        and entry points for enabling the Zed model provider."
+        and entry points for enabling the LEAD model provider."
     }
 
     fn preview(_window: &mut Window, _cx: &mut App) -> AnyElement {
@@ -873,7 +873,7 @@ impl Component for ZedAiConfiguration {
                     }),
                 ),
                 single_example(
-                    "Zed Pro Trial Plan",
+                    "LEAD Pro Trial Plan",
                     configuration(PreviewConfiguration {
                         plan: Some(Plan::ZedProTrial),
                         is_connected: true,
@@ -882,7 +882,7 @@ impl Component for ZedAiConfiguration {
                     }),
                 ),
                 single_example(
-                    "Zed Pro Plan",
+                    "LEAD Pro Plan",
                     configuration(PreviewConfiguration {
                         plan: Some(Plan::ZedPro),
                         is_connected: true,
@@ -891,7 +891,7 @@ impl Component for ZedAiConfiguration {
                     }),
                 ),
                 single_example(
-                    "Business Plan - Zed models enabled",
+                    "Business Plan - LEAD models enabled",
                     configuration(PreviewConfiguration {
                         plan: Some(Plan::ZedBusiness),
                         is_connected: true,
@@ -900,7 +900,7 @@ impl Component for ZedAiConfiguration {
                     }),
                 ),
                 single_example(
-                    "Business Plan - Zed models disabled",
+                    "Business Plan - LEAD models disabled",
                     configuration(PreviewConfiguration {
                         plan: Some(Plan::ZedBusiness),
                         is_connected: true,

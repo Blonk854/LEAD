@@ -17906,7 +17906,7 @@ async fn test_completion_can_run_commands(cx: &mut TestAppContext) {
     assert_eq!(
         command_calls.load(atomic::Ordering::Acquire),
         1,
-        "For completion with a registered command, Zed should send a command execution request",
+        "For completion with a registered command, LEAD should send a command execution request",
     );
 
     editor.update_in(cx, |editor, window, cx| {
@@ -17945,7 +17945,7 @@ async fn test_completion_can_run_commands(cx: &mut TestAppContext) {
     assert_eq!(
         command_calls.load(atomic::Ordering::Acquire),
         1,
-        "For completion with an unregistered command, Zed should not send a command execution request",
+        "For completion with an unregistered command, LEAD should not send a command execution request",
     );
 }
 
@@ -19592,7 +19592,7 @@ async fn test_toggle_block_comment(cx: &mut TestAppContext) {
     cx.update_editor(|editor, window, cx| {
         editor.toggle_comments(&ToggleComments::default(), window, cx)
     });
-    // TODO this is how it actually worked in Zed Stable, which is not very ergonomic.
+    // TODO this is how it actually worked in LEAD Stable, which is not very ergonomic.
     // Uncommenting and commenting from this position brings in even more wrong artifacts.
     cx.assert_editor_state(
         &r#"
@@ -23353,7 +23353,7 @@ struct Row10;"#};
         &mut cx,
     );
 
-    // Deletion hunks are ephemeral, so it's impossible to place the caret into them — Zed triggers reverts for lines, adjacent to carets and selections.
+    // Deletion hunks are ephemeral, so it's impossible to place the caret into them — LEAD triggers reverts for lines, adjacent to carets and selections.
     assert_hunk_revert(
         indoc! {r#"struct Row;
                    ˇstruct Row2;
@@ -33212,14 +33212,14 @@ async fn test_paste_url_from_other_app_replaces_existing_url_without_creating_ma
 
     let mut cx = EditorTestContext::new(cx).await;
     cx.update_buffer(|buffer, cx| buffer.set_language(Some(markdown_language), cx));
-    cx.set_state("Please visit zed's homepage: «https://www.apple.comˇ»");
+    cx.set_state("Please visit LEAD's homepage: «https://www.apple.comˇ»");
 
     cx.update_editor(|editor, window, cx| {
         cx.write_to_clipboard(ClipboardItem::new_string(url.to_string()));
         editor.paste(&Paste, window, cx);
     });
 
-    cx.assert_editor_state(&format!("Please visit zed's homepage: {url}ˇ"));
+    cx.assert_editor_state(&format!("Please visit LEAD's homepage: {url}ˇ"));
 }
 
 #[gpui::test]
@@ -33268,7 +33268,7 @@ async fn test_paste_url_from_other_app_without_creating_markdown_link_in_non_mar
 
     let mut cx = EditorTestContext::new(cx).await;
     cx.update_buffer(|buffer, cx| buffer.set_language(Some(markdown_language), cx));
-    cx.set_state("// Hello, «editorˇ».\n// Zed is «ˇgreat» (see this link: ˇ)");
+    cx.set_state("// Hello, «editorˇ».\n// LEAD is «ˇgreat» (see this link: ˇ)");
 
     cx.update_editor(|editor, window, cx| {
         cx.write_to_clipboard(ClipboardItem::new_string(url.to_string()));
@@ -33276,7 +33276,7 @@ async fn test_paste_url_from_other_app_without_creating_markdown_link_in_non_mar
     });
 
     cx.assert_editor_state(&format!(
-        "// Hello, {url}ˇ.\n// Zed is {url}ˇ (see this link: {url}ˇ)"
+        "// Hello, {url}ˇ.\n// LEAD is {url}ˇ (see this link: {url}ˇ)"
     ));
 }
 

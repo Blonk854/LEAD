@@ -1781,6 +1781,55 @@ impl AcpThread {
         self.push_assistant_content_block_with_indent(chunk, is_thought, false, cx)
     }
 
+    pub fn replace_pending_assistant_text(&mut self, text: String, cx: &mut Context<Self>) {
+        self.replace_pending_assistant_content(text, false, cx);
+    }
+
+    pub fn replace_pending_assistant_thinking(&mut self, text: String, cx: &mut Context<Self>) {
+        self.replace_pending_assistant_content(text, true, cx);
+    }
+
+    fn replace_pending_assistant_content(
+        &mut self,
+        text: String,
+        is_thought: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let markdown = self.streaming_markdown_target(is_thought, false);
+        // A trip is authoritative. Stop any buffered loop text from continuing
+        // to reveal even if the expected Markdown target is unavailable.
+        self.streaming_text_buffer.take();
+        let Some(markdown) = markdown else {
+            self.push_assistant_content_block(text.into(), is_thought, cx);
+            return;
+        };
+        markdown.update(cx, |markdown, cx| markdown.replace(text, cx));
+        if !self.entries.is_empty() {
+            cx.emit(AcpThreadEvent::EntryUpdated(self.entries.len() - 1));
+        }
+    }
+
+    /// Start a fresh assistant message entry so later streamed text (and any
+    /// anti-loop replacements) cannot rewrite earlier recovered content.
+    pub fn begin_new_assistant_message(&mut self, cx: &mut Context<Self>) {
+        Self::flush_streaming_text(&mut self.streaming_text_buffer, cx);
+        if !matches!(
+            self.entries.last(),
+            Some(AgentThreadEntry::AssistantMessage(_))
+        ) {
+            return;
+        }
+
+        self.push_entry(
+            AgentThreadEntry::AssistantMessage(AssistantMessage {
+                chunks: Vec::new(),
+                indented: false,
+                is_subagent_output: false,
+            }),
+            cx,
+        );
+    }
+
     pub fn push_assistant_content_block_with_indent(
         &mut self,
         chunk: acp::ContentBlock,
@@ -3856,7 +3905,7 @@ mod tests {
             .unwrap();
 
         thread
-            .update(cx, |thread, cx| thread.send_raw("Hello from Zed!", cx))
+            .update(cx, |thread, cx| thread.send_raw("Hello from LEAD!", cx))
             .await
             .unwrap();
 
@@ -3866,7 +3915,7 @@ mod tests {
             indoc! {r#"
             ## User
 
-            Hello from Zed!
+            Hello from LEAD!
 
             ## Assistant
 
@@ -3916,12 +3965,12 @@ mod tests {
             .unwrap();
 
         thread
-            .update(cx, |thread, cx| thread.send_raw("Hello from Zed!", cx))
+            .update(cx, |thread, cx| thread.send_raw("Hello from LEAD!", cx))
             .await
             .unwrap();
 
         let output = thread.read_with(cx, |thread, cx| thread.to_markdown(cx));
-        assert_eq!(output.matches("Hello from Zed!").count(), 1);
+        assert_eq!(output.matches("Hello from LEAD!").count(), 1);
     }
 
     #[gpui::test]
@@ -6050,7 +6099,7 @@ mod tests {
     /// the outer task observes `rx.await` returning `Err(Cancelled)` and
     /// must still clear `running_turn` so the panel transitions out of
     /// `Generating`. Without this, the agent thread is wedged in the
-    /// loading state until Zed restarts.
+    /// loading state until LEAD restarts.
     #[gpui::test]
     async fn test_running_turn_cleared_when_send_task_dropped(cx: &mut TestAppContext) {
         init_test(cx);

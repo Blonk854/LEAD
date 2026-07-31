@@ -149,9 +149,9 @@ pub fn init(user_store: Entity<UserStore>, client: Arc<Client>, cx: &mut App) {
 /// Recomputes and sets the [`LanguageModelRegistry`]'s environment fallback
 /// model based on currently authenticated providers.
 ///
-/// Prefers the Zed cloud provider so that, once the user is signed in, we
-/// always pick a Zed-hosted model over models from other authenticated
-/// providers in the environment. If the Zed cloud provider is authenticated
+/// Prefers the LEAD cloud provider so that, once the user is signed in, we
+/// always pick a LEAD-hosted model over models from other authenticated
+/// providers in the environment. If the LEAD cloud provider is authenticated
 /// but hasn't finished loading its models yet, we don't fall back to another
 /// provider to avoid flickering between providers during sign in.
 pub fn update_environment_fallback_model(cx: &mut App) {
@@ -273,7 +273,12 @@ fn register_language_model_providers(
     credentials_provider: Arc<dyn CredentialsProvider>,
     cx: &mut Context<LanguageModelRegistry>,
 ) {
-    register_local_language_model_providers(registry, client.clone(), credentials_provider.clone(), cx);
+    register_local_language_model_providers(
+        registry,
+        client.clone(),
+        credentials_provider.clone(),
+        cx,
+    );
 
     if !paths::LOCAL_ONLY {
         register_cloud_language_model_providers(
@@ -414,4 +419,15 @@ fn register_cloud_language_model_providers(
         )),
         cx,
     );
+}
+
+/// Ensures the reserved Network Agent provider has credentials loaded in memory.
+pub fn sync_network_agent_provider_credentials(cx: &mut App) {
+    use crate::provider::open_ai_compatible::NETWORK_AGENT_PROVIDER_ID;
+
+    let provider_id = LanguageModelProviderId::from(NETWORK_AGENT_PROVIDER_ID.to_string());
+    let Some(provider) = LanguageModelRegistry::read_global(cx).provider(&provider_id) else {
+        return;
+    };
+    let _ = provider.authenticate(cx);
 }

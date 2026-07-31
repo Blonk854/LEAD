@@ -164,7 +164,8 @@ fn tool_call_from_object(value: &Value, known_tools: &[&str]) -> Option<Extracte
 
     let (input, raw_input) = match arguments {
         Some(Value::String(raw)) => {
-            let parsed = normalize_tool_arguments_lenient(raw).unwrap_or_else(|_| Value::Object(Default::default()));
+            let parsed = normalize_tool_arguments_lenient(raw)
+                .unwrap_or_else(|_| Value::Object(Default::default()));
             (parsed, raw.clone())
         }
         Some(other) => {
@@ -189,10 +190,7 @@ fn extract_json_candidates(text: &str) -> Vec<String> {
         if trimmed.is_empty() {
             continue;
         }
-        let json_body = trimmed
-            .strip_prefix("json")
-            .unwrap_or(trimmed)
-            .trim();
+        let json_body = trimmed.strip_prefix("json").unwrap_or(trimmed).trim();
         if json_body.starts_with('{') || json_body.starts_with('[') {
             candidates.push(json_body.to_string());
         }
@@ -308,7 +306,10 @@ fn extract_xml_tool_calls(text: &str, known_tools: &[&str]) -> Vec<ExtractedTool
 }
 
 /// Returns `(name attribute or empty, inner text)` for simple XML-like blocks.
-fn extract_xml_blocks(text: &str, tag: &str) -> Vec<(String, std::collections::HashMap<String, String>)> {
+fn extract_xml_blocks(
+    text: &str,
+    tag: &str,
+) -> Vec<(String, std::collections::HashMap<String, String>)> {
     let mut results = Vec::new();
     let open = format!("<{tag}");
     let close = format!("</{tag}>");
@@ -342,10 +343,16 @@ fn extract_xml_blocks(text: &str, tag: &str) -> Vec<(String, std::collections::H
 
 fn parse_xml_name_attr(header: &str) -> String {
     for part in header.split_whitespace() {
-        if let Some(value) = part.strip_prefix("name=\"").and_then(|v| v.strip_suffix('"')) {
+        if let Some(value) = part
+            .strip_prefix("name=\"")
+            .and_then(|v| v.strip_suffix('"'))
+        {
             return value.to_string();
         }
-        if let Some(value) = part.strip_prefix("name='").and_then(|v| v.strip_suffix('\'')) {
+        if let Some(value) = part
+            .strip_prefix("name='")
+            .and_then(|v| v.strip_suffix('\''))
+        {
             return value.to_string();
         }
     }

@@ -154,15 +154,15 @@ impl ZedAiOnboarding {
             .w_full()
             .relative()
             .gap_1()
-            .child(Headline::new("Welcome to Zed AI"))
+            .child(Headline::new("Welcome to LEAD AI"))
             .child(
-                Label::new("Sign in to try Zed Pro free for 14 days.")
+                Label::new("Sign in to try LEAD Pro free for 14 days.")
                     .color(Color::Muted)
                     .mb_2(),
             )
             .child(PlanDefinitions.sign_in_upsell())
             .child(
-                Button::new("sign_in", "Try Zed Pro for Free")
+                Button::new("sign_in", "Try LEAD Pro for Free")
                     .disabled(signing_in)
                     .full_width()
                     .style(ButtonStyle::Tinted(ui::TintColor::Accent))
@@ -184,7 +184,7 @@ impl ZedAiOnboarding {
                 .relative()
                 .min_w_0()
                 .gap_1()
-                .child(Headline::new("Welcome to Zed AI"))
+                .child(Headline::new("Welcome to LEAD AI"))
                 .child(YoungAccountBanner)
                 .child(
                     v_flex()
@@ -221,7 +221,7 @@ impl ZedAiOnboarding {
                 .w_full()
                 .relative()
                 .gap_1()
-                .child(Headline::new("Welcome to Zed AI"))
+                .child(Headline::new("Welcome to LEAD AI"))
                 .child(
                     v_flex()
                         .mt_2()
@@ -287,7 +287,7 @@ impl ZedAiOnboarding {
             .relative()
             .gap_1()
             .child(Self::pro_trial_stamp(cx))
-            .child(Headline::new("Welcome to the Zed Pro Trial"))
+            .child(Headline::new("Welcome to the LEAD Pro Trial"))
             .child(
                 Label::new("Here's what you get for the next 14 days:")
                     .color(Color::Muted)
@@ -304,7 +304,7 @@ impl ZedAiOnboarding {
             .relative()
             .gap_1()
             .child(Self::certified_user_stamp(cx))
-            .child(Headline::new("Welcome to Zed Pro"))
+            .child(Headline::new("Welcome to LEAD Pro"))
             .child(
                 Label::new("Here's what you get:")
                     .color(Color::Muted)
@@ -321,7 +321,7 @@ impl ZedAiOnboarding {
             .relative()
             .gap_1()
             .child(Self::business_stamp(cx))
-            .child(Headline::new("Welcome to Zed Business"))
+            .child(Headline::new("Welcome to LEAD Business"))
             .child(
                 Label::new("Here's what you get:")
                     .color(Color::Muted)
@@ -338,7 +338,7 @@ impl ZedAiOnboarding {
             .relative()
             .gap_1()
             .child(Self::student_stamp(cx))
-            .child(Headline::new("Welcome to Zed Student"))
+            .child(Headline::new("Welcome to LEAD Student"))
             .child(
                 Label::new("Here's what you get:")
                     .color(Color::Muted)
@@ -378,7 +378,7 @@ impl Component for ZedAiOnboarding {
 
     fn description() -> &'static str {
         "The onboarding surface shown to new agent panel users, \
-        guiding them through signing in to Zed and selecting a plan \
+        guiding them through signing in to LEAD and selecting a plan \
         before they can start using the agent."
     }
 

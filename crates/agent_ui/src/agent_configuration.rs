@@ -7,6 +7,7 @@ mod tool_picker;
 use std::{ops::Range, rc::Rc, sync::Arc};
 
 use agent::ContextServerRegistry;
+use agent_settings::AgentSettings;
 use anyhow::Result;
 use cloud_api_types::Plan;
 use collections::HashMap;
@@ -122,7 +123,11 @@ impl AgentConfiguration {
     }
 
     fn build_provider_configuration_views(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let providers = LanguageModelRegistry::read_global(cx).visible_providers();
+        let providers = LanguageModelRegistry::read_global(cx)
+            .visible_providers()
+            .into_iter()
+            .filter(|provider| provider.id().0.as_ref() != AgentSettings::NETWORK_AGENT_PROVIDER_ID)
+            .collect::<Vec<_>>();
         for provider in providers {
             self.add_provider_configuration_view(&provider, window, cx);
         }
@@ -428,7 +433,11 @@ impl AgentConfiguration {
         &mut self,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let providers = LanguageModelRegistry::read_global(cx).visible_providers();
+        let providers = LanguageModelRegistry::read_global(cx)
+            .visible_providers()
+            .into_iter()
+            .filter(|provider| provider.id().0.as_ref() != AgentSettings::NETWORK_AGENT_PROVIDER_ID)
+            .collect::<Vec<_>>();
 
         let popover_menu = PopoverMenu::new("add-provider-popover")
             .trigger(
@@ -474,7 +483,7 @@ impl AgentConfiguration {
             .w_full()
             .child(self.render_section_title(
                 "LLM Providers",
-                "Add at least one provider to use AI-powered features with Zed's native agent.",
+                "Add at least one provider to use AI-powered features with LEAD's native agent.",
                 popover_menu.into_any_element(),
             ))
             .child(
@@ -574,7 +583,7 @@ impl AgentConfiguration {
             .border_color(cx.theme().colors().border)
             .child(self.render_section_title(
                 "Model Context Protocol (MCP) Servers",
-                "All MCP servers connected directly or via a Zed extension.",
+                "All MCP servers connected directly or via a LEAD extension.",
                 add_server_popover.into_any_element(),
             ))
             .child(

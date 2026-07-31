@@ -25,6 +25,8 @@ agent_servers.workspace = true
 agent_settings.workspace = true
 agent_skills.workspace = true
 anyhow.workspace = true
+async-io.workspace = true
+base64.workspace = true
 chrono.workspace = true
 client.workspace = true
 cloud_api_types.workspace = true
@@ -32,6 +34,7 @@ cloud_llm_client.workspace = true
 collections.workspace = true
 context_server.workspace = true
 db.workspace = true
+enigo.workspace = true
 feature_flags.workspace = true
 fs.workspace = true
 futures.workspace = true
@@ -41,6 +44,7 @@ handlebars = { workspace = true, features = ["rust-embed"] }
 heck.workspace = true
 html_to_markdown.workspace = true
 http_client.workspace = true
+image.workspace = true
 indoc.workspace = true
 itertools.workspace = true
 language.workspace = true
@@ -61,6 +65,7 @@ settings.workspace = true
 shell_command_parser.workspace = true
 smallvec.workspace = true
 sqlez.workspace = true
+sysinfo.workspace = true
 streaming_diff.workspace = true
 strsim.workspace = true
 task.workspace = true
@@ -72,10 +77,19 @@ ui.workspace = true
 url.workspace = true
 util.workspace = true
 uuid.workspace = true
+walkdir.workspace = true
 watch.workspace = true
+web_research.workspace = true
 web_search.workspace = true
+xcap.workspace = true
 zed_env_vars.workspace = true
 zstd.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 assets.workspace = true

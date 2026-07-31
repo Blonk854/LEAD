@@ -6,16 +6,26 @@ use crate::role::Role;
 use crate::{LanguageModelToolUse, LanguageModelToolUseId, SharedString};
 
 /// Dimensions of a `LanguageModelImage`
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ImageSize {
     pub width: i32,
     pub height: i32,
 }
 
+fn default_image_mime_type() -> SharedString {
+    SharedString::from("image/png")
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub struct LanguageModelImage {
-    /// A base64-encoded PNG image.
+    /// Base64-encoded image bytes (without the `data:` prefix).
     pub source: SharedString,
+    /// Pixel dimensions of the encoded image. Zero means unknown (legacy data).
+    #[serde(default)]
+    pub size: ImageSize,
+    /// MIME type of the encoded bytes, e.g. `image/png` or `image/jpeg`.
+    #[serde(default = "default_image_mime_type")]
+    pub mime_type: SharedString,
 }
 
 impl LanguageModelImage {
@@ -28,16 +38,54 @@ impl LanguageModelImage {
     }
 
     pub fn empty() -> Self {
-        Self { source: "".into() }
+        Self {
+            source: "".into(),
+            size: ImageSize::default(),
+            mime_type: default_image_mime_type(),
+        }
+    }
+
+    pub fn from_source(source: impl Into<SharedString>) -> Self {
+        Self {
+            source: source.into(),
+            size: ImageSize::default(),
+            mime_type: default_image_mime_type(),
+        }
+    }
+
+    /// OpenAI-style vision token estimate from image dimensions.
+    ///
+    /// `tokens ≈ 85 + 170 * ceil(w/512) * ceil(h/512)`. Falls back to a
+    /// conservative constant when dimensions are unknown so base64 byte length
+    /// is never mistaken for text tokens.
+    pub fn estimate_tokens(&self) -> u64 {
+        estimate_image_tokens(self.size)
     }
 
     /// Parse Self from a JSON object with case-insensitive field names
     pub fn from_json(obj: &serde_json::Map<String, serde_json::Value>) -> Option<Self> {
         let mut source = None;
+        let mut width = None;
+        let mut height = None;
+        let mut mime_type = None;
 
         for (k, v) in obj.iter() {
             match k.to_lowercase().as_str() {
                 "source" => source = v.as_str(),
+                "mime_type" | "mimetype" => mime_type = v.as_str(),
+                "size" => {
+                    if let Some(size_obj) = v.as_object() {
+                        for (sk, sv) in size_obj.iter() {
+                            match sk.to_lowercase().as_str() {
+                                "width" => width = sv.as_i64().map(|n| n as i32),
+                                "height" => height = sv.as_i64().map(|n| n as i32),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                "width" => width = v.as_i64().map(|n| n as i32),
+                "height" => height = v.as_i64().map(|n| n as i32),
                 _ => {}
             }
         }
@@ -45,18 +93,37 @@ impl LanguageModelImage {
         let source = source?;
         Some(Self {
             source: SharedString::from(source.to_string()),
+            size: ImageSize {
+                width: width.unwrap_or(0),
+                height: height.unwrap_or(0),
+            },
+            mime_type: mime_type
+                .map(|value| SharedString::from(value.to_string()))
+                .unwrap_or_else(default_image_mime_type),
         })
     }
 
     pub fn to_base64_url(&self) -> String {
-        format!("data:image/png;base64,{}", self.source)
+        format!("data:{};base64,{}", self.mime_type, self.source)
     }
+}
+
+/// Estimate vision tokens for an image using an OpenAI-style 512px tile formula.
+pub fn estimate_image_tokens(size: ImageSize) -> u64 {
+    if size.width <= 0 || size.height <= 0 {
+        return 1_100;
+    }
+    let tiles_x = (size.width as u64).div_ceil(512);
+    let tiles_y = (size.height as u64).div_ceil(512);
+    85 + 170 * tiles_x * tiles_y
 }
 
 impl std::fmt::Debug for LanguageModelImage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LanguageModelImage")
             .field("source", &format!("<{} bytes>", self.source.len()))
+            .field("size", &self.size)
+            .field("mime_type", &self.mime_type)
             .finish()
     }
 }
@@ -536,6 +603,9 @@ mod tests {
         match &result.content[1] {
             LanguageModelToolResultContent::Image(image) => {
                 assert_eq!(image.source.as_ref(), "data");
+                assert_eq!(image.size.width, 1);
+                assert_eq!(image.size.height, 2);
+                assert_eq!(image.mime_type.as_ref(), "image/png");
             }
             _ => panic!("Expected Image variant"),
         }
@@ -544,6 +614,50 @@ mod tests {
         let roundtripped: LanguageModelToolResult =
             serde_json::from_value(serde_json::to_value(&result).unwrap()).unwrap();
         assert_eq!(roundtripped, result);
+    }
+
+    #[test]
+    fn test_estimate_image_tokens_uses_tile_formula() {
+        assert_eq!(
+            estimate_image_tokens(ImageSize {
+                width: 1280,
+                height: 720
+            }),
+            1_105
+        );
+        assert_eq!(
+            estimate_image_tokens(ImageSize {
+                width: 512,
+                height: 512
+            }),
+            255
+        );
+        assert_eq!(estimate_image_tokens(ImageSize::default()), 1_100);
+        assert_eq!(
+            LanguageModelImage {
+                source: "AAAA".into(),
+                size: ImageSize {
+                    width: 1280,
+                    height: 720
+                },
+                mime_type: "image/jpeg".into(),
+            }
+            .estimate_tokens(),
+            1_105
+        );
+        assert_eq!(
+            LanguageModelImage::from_source("AAAA").to_base64_url(),
+            "data:image/png;base64,AAAA"
+        );
+        assert_eq!(
+            LanguageModelImage {
+                source: "AAAA".into(),
+                size: ImageSize::default(),
+                mime_type: "image/jpeg".into(),
+            }
+            .to_base64_url(),
+            "data:image/jpeg;base64,AAAA"
+        );
     }
 
     #[test]

@@ -691,10 +691,10 @@ mod tests {
     #[gpui::test]
     fn test_exact_match(cx: &mut TestAppContext) {
         let models = create_models(vec![
-            ("zed", "Claude 3.7 Sonnet"),
-            ("zed", "Claude 3.7 Sonnet Thinking"),
-            ("zed", "gpt-5"),
-            ("zed", "gpt-5-mini"),
+            ("LEAD", "Claude 3.7 Sonnet"),
+            ("LEAD", "Claude 3.7 Sonnet Thinking"),
+            ("LEAD", "gpt-5"),
+            ("LEAD", "gpt-5-mini"),
             ("openai", "gpt-3.5-turbo"),
             ("openai", "gpt-5"),
             ("openai", "gpt-5-mini"),
@@ -723,10 +723,10 @@ mod tests {
     #[gpui::test]
     fn test_fuzzy_match(cx: &mut TestAppContext) {
         let models = create_models(vec![
-            ("zed", "Claude 3.7 Sonnet"),
-            ("zed", "Claude 3.7 Sonnet Thinking"),
-            ("zed", "gpt-5"),
-            ("zed", "gpt-5-mini"),
+            ("LEAD", "Claude 3.7 Sonnet"),
+            ("LEAD", "Claude 3.7 Sonnet Thinking"),
+            ("LEAD", "gpt-5"),
+            ("LEAD", "gpt-5-mini"),
             ("openai", "gpt-3.5-turbo"),
             ("openai", "gpt-5"),
             ("openai", "gpt-5-mini"),
@@ -757,10 +757,10 @@ mod tests {
 
     #[gpui::test]
     fn test_recommended_models_also_appear_in_other(_cx: &mut TestAppContext) {
-        let recommended_models = create_models(vec![("zed", "claude")]);
+        let recommended_models = create_models(vec![("LEAD", "claude")]);
         let all_models = create_models(vec![
-            ("zed", "claude"), // Should also appear in "other"
-            ("zed", "gemini"),
+            ("LEAD", "claude"), // Should also appear in "other"
+            ("LEAD", "gemini"),
             ("copilot", "o3"),
         ]);
 
@@ -782,10 +782,10 @@ mod tests {
 
     #[gpui::test]
     fn test_models_from_different_providers(_cx: &mut TestAppContext) {
-        let recommended_models = create_models(vec![("zed", "claude")]);
+        let recommended_models = create_models(vec![("LEAD", "claude")]);
         let all_models = create_models(vec![
-            ("zed", "claude"), // Should also appear in "other"
-            ("zed", "gemini"),
+            ("LEAD", "claude"), // Should also appear in "other"
+            ("LEAD", "gemini"),
             ("copilot", "claude"), // Different provider, should appear in "other"
         ]);
 
@@ -807,10 +807,10 @@ mod tests {
 
     #[gpui::test]
     fn test_favorites_section_appears_when_favorites_exist(_cx: &mut TestAppContext) {
-        let recommended_models = create_models(vec![("zed", "claude")]);
+        let recommended_models = create_models(vec![("LEAD", "claude")]);
         let all_models = create_models_with_favorites(
-            vec![("zed", "claude"), ("zed", "gemini"), ("openai", "gpt-4")],
-            vec![("zed", "gemini")],
+            vec![("LEAD", "claude"), ("LEAD", "gemini"), ("openai", "gpt-4")],
+            vec![("LEAD", "gemini")],
         );
 
         let grouped_models = GroupedModels::new(all_models, recommended_models);
@@ -826,8 +826,8 @@ mod tests {
 
     #[gpui::test]
     fn test_no_favorites_section_when_no_favorites(_cx: &mut TestAppContext) {
-        let recommended_models = create_models(vec![("zed", "claude")]);
-        let all_models = create_models(vec![("zed", "claude"), ("zed", "gemini")]);
+        let recommended_models = create_models(vec![("LEAD", "claude")]);
+        let all_models = create_models(vec![("LEAD", "claude"), ("LEAD", "gemini")]);
 
         let grouped_models = GroupedModels::new(all_models, recommended_models);
         let entries = grouped_models.entries();
@@ -843,10 +843,10 @@ mod tests {
     #[gpui::test]
     fn test_models_have_correct_actions(_cx: &mut TestAppContext) {
         let recommended_models =
-            create_models_with_favorites(vec![("zed", "claude")], vec![("zed", "claude")]);
+            create_models_with_favorites(vec![("LEAD", "claude")], vec![("LEAD", "claude")]);
         let all_models = create_models_with_favorites(
-            vec![("zed", "claude"), ("zed", "gemini"), ("openai", "gpt-4")],
-            vec![("zed", "claude")],
+            vec![("LEAD", "claude"), ("LEAD", "gemini"), ("openai", "gpt-4")],
+            vec![("LEAD", "claude")],
         );
 
         let grouped_models = GroupedModels::new(all_models, recommended_models);
@@ -869,15 +869,15 @@ mod tests {
 
     #[gpui::test]
     fn test_favorites_appear_in_other_sections(_cx: &mut TestAppContext) {
-        let favorites = vec![("zed", "gemini"), ("openai", "gpt-4")];
+        let favorites = vec![("LEAD", "gemini"), ("openai", "gpt-4")];
 
         let recommended_models =
-            create_models_with_favorites(vec![("zed", "claude")], favorites.clone());
+            create_models_with_favorites(vec![("LEAD", "claude")], favorites.clone());
 
         let all_models = create_models_with_favorites(
             vec![
-                ("zed", "claude"),
-                ("zed", "gemini"),
+                ("LEAD", "claude"),
+                ("LEAD", "gemini"),
                 ("openai", "gpt-4"),
                 ("openai", "gpt-3.5"),
             ],

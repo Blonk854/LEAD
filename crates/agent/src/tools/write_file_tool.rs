@@ -6,7 +6,7 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolInput, ToolInputPayload}
 use action_log::ActionLog;
 use agent_client_protocol::schema as acp;
 use futures::FutureExt as _;
-use gpui::{App, AsyncApp, Entity, Task, WeakEntity};
+use gpui::{App, AppContext as _, AsyncApp, Entity, Task, WeakEntity};
 use language::LanguageRegistry;
 use project::Project;
 use schemars::JsonSchema;
@@ -106,6 +106,10 @@ impl WriteFileTool {
                                     if session.is_none()
                                         && path_complete
                                         && let Some(path) = parsed.path.as_ref()
+                                        && !self.is_external_full_access_path(
+                                            std::path::Path::new(path),
+                                            cx,
+                                        )
                                     {
                                         match EditSession::new(
                                             PathBuf::from(path),
@@ -137,6 +141,23 @@ impl WriteFileTool {
                                 }
                             }
                             ToolInputPayload::Full(full_input) => {
+                                if self.is_external_full_access_path(&full_input.path, cx) {
+                                    return match self
+                                        .write_external_file(
+                                            full_input.path,
+                                            full_input.content,
+                                            event_stream,
+                                            cx,
+                                        )
+                                        .await
+                                    {
+                                        Ok(output) => EditSessionResult::External(output),
+                                        Err(error) => EditSessionResult::Failed {
+                                            error,
+                                            session: None,
+                                        },
+                                    };
+                                }
                                 let mut session = if let Some(session) = session {
                                     session
                                 } else {
@@ -196,6 +217,57 @@ impl WriteFileTool {
                 }
             }
         }
+    }
+
+    fn is_external_full_access_path(&self, path: &std::path::Path, cx: &AsyncApp) -> bool {
+        path.is_absolute()
+            && cx.read_entity(self.session_context.project(), |project, cx| {
+                project.find_project_path(path, cx).is_none() && crate::full_access_enabled(cx)
+            })
+    }
+
+    async fn write_external_file(
+        &self,
+        path: PathBuf,
+        content: String,
+        event_stream: &ToolCallEventStream,
+        cx: &mut AsyncApp,
+    ) -> Result<EditSessionOutput, String> {
+        let project = self.session_context.project().clone();
+        let fs = project.read_with(cx, |project, _cx| project.fs().clone());
+        let path = crate::canonicalize_for_access(&path, fs.as_ref()).await?;
+        let gate = cx
+            .update(|cx| crate::escape_gate(&project, std::slice::from_ref(&path), Self::NAME, cx))
+            .map_err(|error| error.to_string())?;
+        if let Some(context) = gate {
+            let authorize = cx.update(|cx| {
+                event_stream.authorize(
+                    format!("Write file outside project: {}", path.display()),
+                    context,
+                    cx,
+                )
+            });
+            authorize.await.map_err(|error| error.to_string())?;
+        }
+
+        let old_text = if fs.is_file(&path).await {
+            fs.load(&path).await.map_err(|error| error.to_string())?
+        } else {
+            String::new()
+        };
+        fs.write(&path, content.as_bytes())
+            .await
+            .map_err(|error| error.to_string())?;
+        let diff = language::unified_diff(&old_text, &content);
+        event_stream.update_fields(
+            acp::ToolCallUpdateFields::new().locations(vec![acp::ToolCallLocation::new(&path)]),
+        );
+        Ok(EditSessionOutput::Success {
+            input_path: path,
+            new_text: content,
+            old_text: Arc::new(old_text),
+            diff,
+        })
     }
 }
 
@@ -272,7 +344,7 @@ mod tests {
     use action_log::ActionLog;
     use fs::Fs as _;
     use futures::StreamExt as _;
-    use gpui::{AppContext as _, Entity, TestAppContext, UpdateGlobal};
+    use gpui::{Entity, TestAppContext, UpdateGlobal};
     use language::language_settings::FormatOnSave;
     use language_model::fake_provider::FakeLanguageModel;
     use project::{Project, ProjectPath};

@@ -51,9 +51,11 @@ pub fn load_context(mention_set: &Entity<MentionSet>, cx: &mut App) -> Task<Opti
                 Mention::Text { content, .. } => {
                     loaded_context.text.push_str(&content);
                 }
-                Mention::Image(mention_image) => loaded_context.images.push(LanguageModelImage {
-                    source: mention_image.data,
-                }),
+                Mention::Image(mention_image) => {
+                    loaded_context
+                        .images
+                        .push(LanguageModelImage::from_source(mention_image.data));
+                }
                 Mention::Link => {}
             }
         }

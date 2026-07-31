@@ -22,9 +22,10 @@ mod language_model_selector;
 mod mention_set;
 mod message_editor;
 mod mode_selector;
-mod network_agent;
 mod model_selector;
 mod model_selector_popover;
+mod network_agent;
+mod network_agent_health;
 mod profile_selector;
 mod terminal_codegen;
 mod terminal_inline_assistant;
@@ -34,6 +35,7 @@ pub mod test_support;
 mod thread_import;
 pub mod thread_metadata_store;
 pub mod thread_worktree_archive;
+mod tool_call_smoke_modal;
 
 pub mod threads_archive_view;
 mod ui;
@@ -292,7 +294,7 @@ actions!(
         ScrollOutputToPreviousMessage,
         /// Scroll the output to the next user message.
         ScrollOutputToNextMessage,
-        /// Import agent threads from other Zed release channels (e.g. Preview, Nightly).
+        /// Import agent threads from other LEAD release channels (e.g. Preview, Nightly).
         ImportThreadsFromOtherChannels,
         /// Starts a new terminal thread.
         NewTerminalThread,
@@ -434,7 +436,7 @@ impl Agent {
 
     pub fn label(&self) -> SharedString {
         match self {
-            Self::NativeAgent => "Zed Agent".into(),
+            Self::NativeAgent => agent::NATIVE_AGENT_DISPLAY_NAME.into(),
             Self::Custom { id, .. } => id.0.clone(),
             #[cfg(any(test, feature = "test-support"))]
             Self::Stub => "Stub Agent".into(),
@@ -855,7 +857,7 @@ fn init_language_model_settings(cx: &mut App) {
     .detach();
 }
 
-fn update_active_language_model_from_settings(cx: &mut App) {
+pub(crate) fn update_active_language_model_from_settings(cx: &mut App) {
     let settings = AgentSettings::get_global(cx);
 
     fn to_selected_model(selection: &LanguageModelSelection) -> language_model::SelectedModel {

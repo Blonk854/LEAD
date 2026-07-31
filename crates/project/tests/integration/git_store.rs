@@ -1208,7 +1208,7 @@ mod git_worktrees {
 
         // Valid: subdirectory
         assert!(
-            worktrees_directory_for_repo(work_dir, ".git/zed-worktrees", PathStyle::Posix).is_ok()
+            worktrees_directory_for_repo(work_dir, ".git/LEAD-worktrees", PathStyle::Posix).is_ok()
         );
         assert!(worktrees_directory_for_repo(work_dir, "my-worktrees", PathStyle::Posix).is_ok());
 
@@ -1747,11 +1747,11 @@ mod resolve_worktree_tests {
     fn test_repo_identity_path() {
         let examples = [
             // Normal checkout: `.git` starts with `.`, so parent is the worktree
-            ("/home/bob/zed/.git", "/home/bob/zed"),
+            ("/home/bob/LEAD/.git", "/home/bob/LEAD"),
             // Bare clone named `.bare`: starts with `.`, so parent is the project dir
             ("/repos/project/.bare", "/repos/project"),
             // Bare clone with `.git` extension: does not start with `.`, kept as-is
-            ("/repos/zed.git", "/repos/zed.git"),
+            ("/repos/LEAD.git", "/repos/LEAD.git"),
             // Bare clone with arbitrary plain name: kept as-is
             ("/repos/project", "/repos/project"),
         ];
@@ -1768,17 +1768,17 @@ mod resolve_worktree_tests {
     fn test_linked_worktree_short_name() {
         let examples = [
             (
-                "/home/bob/zed",
-                "/home/bob/worktrees/olivetti/zed",
+                "/home/bob/LEAD",
+                "/home/bob/worktrees/olivetti/LEAD",
                 Some("olivetti".into()),
             ),
-            ("/home/bob/zed", "/home/bob/zed2", Some("zed2".into())),
+            ("/home/bob/LEAD", "/home/bob/zed2", Some("zed2".into())),
             (
-                "/home/bob/zed",
-                "/home/bob/worktrees/zed/selectric",
+                "/home/bob/LEAD",
+                "/home/bob/worktrees/LEAD/selectric",
                 Some("selectric".into()),
             ),
-            ("/home/bob/zed", "/home/bob/zed", None),
+            ("/home/bob/LEAD", "/home/bob/LEAD", None),
         ];
         for (main_worktree_path, linked_worktree_path, expected) in examples {
             let short_name = linked_worktree_short_name(

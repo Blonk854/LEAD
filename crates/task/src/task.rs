@@ -1,4 +1,4 @@
-//! Baseline interface of Tasks in Zed: all tasks in Zed are intended to use those for implementing their own logic.
+//! Baseline interface of Tasks in LEAD: all tasks in LEAD are intended to use those for implementing their own logic.
 
 mod adapter_schema;
 mod debug_format;
@@ -37,7 +37,7 @@ pub use zed_actions::RevealTarget;
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Deserialize)]
 pub struct TaskId(pub String);
 
-/// Contains all information needed by Zed to spawn a new terminal tab for the given task.
+/// Contains all information needed by LEAD to spawn a new terminal tab for the given task.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct SpawnInTerminal {
     /// Id of the task to use when determining task tab affinity.
@@ -146,7 +146,7 @@ impl ResolvedTask {
     }
 }
 
-/// Variables, available for use in [`TaskContext`] when a Zed's [`TaskTemplate`] gets resolved into a [`ResolvedTask`].
+/// Variables, available for use in [`TaskContext`] when a LEAD's [`TaskTemplate`] gets resolved into a [`ResolvedTask`].
 /// Name of the variable must be a valid shell variable identifier, which generally means that it is
 /// a word  consisting only  of alphanumeric characters and underscores,
 /// and beginning with an alphabetic character or an  underscore.
@@ -248,7 +248,7 @@ impl FromStr for VariableName {
 }
 
 /// A prefix that all [`VariableName`] variants are prefixed with when used in environment variables and similar template contexts.
-pub const ZED_VARIABLE_NAME_PREFIX: &str = "ZED_";
+pub const ZED_VARIABLE_NAME_PREFIX: &str = "zed_";
 const ZED_CUSTOM_VARIABLE_NAME_PREFIX: &str = "CUSTOM_";
 
 impl std::fmt::Display for VariableName {
@@ -281,7 +281,7 @@ impl std::fmt::Display for VariableName {
     }
 }
 
-/// Container for predefined environment variables that describe state of Zed at the time the task was spawned.
+/// Container for predefined environment variables that describe state of LEAD at the time the task was spawned.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct TaskVariables(HashMap<VariableName, String>);
 
@@ -332,14 +332,14 @@ impl IntoIterator for TaskVariables {
 }
 
 /// Keeps track of the file associated with a task and context of tasks execution (i.e. current file or current function).
-/// Keeps all Zed-related state inside, used to produce a resolved task out of its template.
+/// Keeps all LEAD-related state inside, used to produce a resolved task out of its template.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TaskContext {
     /// A path to a directory in which the task should be executed.
     pub cwd: Option<PathBuf>,
     /// Additional environment variables associated with a given task.
     pub task_variables: TaskVariables,
-    /// Environment variables obtained when loading the project into Zed.
+    /// Environment variables obtained when loading the project into LEAD.
     /// This is the environment one would get when `cd`ing in a terminal
     /// into the project's root directory.
     pub project_env: HashMap<String, String>,
@@ -435,7 +435,7 @@ impl EnvVariableReplacer {
             _ => input,
         }
     }
-    // Replaces occurrences of VsCode-specific environment variables with Zed equivalents.
+    // Replaces occurrences of VsCode-specific environment variables with LEAD equivalents.
     fn replace(&self, input: &str) -> String {
         shellexpand::env_with_context_no_errors(&input, |var: &str| {
             // Colons denote a default value in case the variable is not set. We want to preserve that default, as otherwise shellexpand will substitute it for us.
@@ -458,7 +458,7 @@ impl EnvVariableReplacer {
                 }
             };
             if let Some(substitution) = self.variables.get(variable_name) {
-                // Got a VSCode->Zed hit, perform a substitution
+                // Got a VSCode->LEAD hit, perform a substitution
                 let mut name = format!("${{{substitution}");
                 append_previous_default(&mut name);
                 name.push('}');

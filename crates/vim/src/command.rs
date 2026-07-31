@@ -2080,7 +2080,7 @@ pub(crate) struct OnMatchingLines {
 }
 
 impl OnMatchingLines {
-    // convert a vim query into something more usable by zed.
+    // convert a vim query into something more usable by LEAD.
     // we don't attempt to fully convert between the two regex syntaxes,
     // but we do flip \( and \) to ( and ) (and vice-versa) in the pattern,
     // and convert \0..\9 to $0..$9 in the replacement so that common idioms work.

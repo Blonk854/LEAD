@@ -6,6 +6,7 @@ use cli::{CliRequest, CliResponse, CliResponseSink};
 use cli::{IpcHandshake, ipc};
 use client::{ZedLink, parse_zed_link};
 use db::kvp::KeyValueStore;
+use db::write_and_log;
 use editor::Editor;
 use fs::Fs;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -16,7 +17,6 @@ use futures::{FutureExt, StreamExt};
 use git_ui::{file_diff_view::FileDiffView, multi_diff_view::MultiDiffView};
 use gpui::{App, AsyncApp, Global, TaskExt, WindowHandle};
 use onboarding::FIRST_OPEN;
-use onboarding::show_onboarding_view;
 use recent_projects::{RemoteSettings, navigate_to_positions, open_remote_project};
 use remote::{RemoteConnectionOptions, WslConnectionOptions};
 use settings::Settings;
@@ -163,7 +163,7 @@ impl OpenRequest {
         for url in request.urls {
             if let Some(server_name) = url.strip_prefix("zed-cli://") {
                 this.kind = Some(OpenRequestKind::CliConnection(connect_to_cli(server_name)?));
-            } else if let Some(action_index) = url.strip_prefix("zed-dock-action://") {
+            } else if let Some(action_index) = url.strip_prefix("LEAD-dock-action://") {
                 this.kind = Some(OpenRequestKind::DockMenuAction {
                     index: action_index.parse()?,
                 });
@@ -425,7 +425,7 @@ pub fn listen_for_cli_connections(opener: OpenListener) -> Result<()> {
     use release_channel::RELEASE_CHANNEL_NAME;
     use std::os::unix::net::UnixDatagram;
 
-    let sock_path = paths::data_dir().join(format!("zed-{}.sock", *RELEASE_CHANNEL_NAME));
+    let sock_path = paths::data_dir().join(format!("LEAD-{}.sock", *RELEASE_CHANNEL_NAME));
     // remove the socket if the process listening on it has died
     if let Err(e) = UnixDatagram::unbound()?.connect(&sock_path)
         && e.kind() == std::io::ErrorKind::ConnectionRefused
@@ -831,23 +831,23 @@ async fn open_workspaces(
 
     if grouped_locations.is_empty() {
         // If we have no paths to open, show the welcome screen if this is the first launch
-        let kvp = cx.update(|cx| KeyValueStore::global(cx));
-        if matches!(kvp.read_kvp(FIRST_OPEN), Ok(None)) {
-            cx.update(|cx| show_onboarding_view(app_state, cx).detach());
-        }
-        // If not the first launch, show an empty window with empty editor
-        else {
-            cx.update(|cx| {
-                let open_options = OpenOptions {
-                    env,
-                    ..Default::default()
-                };
-                workspace::open_new(open_options, app_state, cx, |workspace, window, cx| {
-                    Editor::new_file(workspace, &Default::default(), window, cx)
-                })
-                .detach_and_log_err(cx);
-            });
-        }
+        cx.update(|cx| {
+            let kvp = KeyValueStore::global(cx);
+            if matches!(kvp.read_kvp(FIRST_OPEN), Ok(None)) {
+                write_and_log(cx, move || async move {
+                    kvp.write_kvp(FIRST_OPEN.to_string(), "false".to_string())
+                        .await
+                });
+            }
+            let open_options = OpenOptions {
+                env,
+                ..Default::default()
+            };
+            workspace::open_new(open_options, app_state, cx, |workspace, window, cx| {
+                Editor::new_file(workspace, &Default::default(), window, cx)
+            })
+            .detach_and_log_err(cx);
+        });
         return Ok(());
     }
     // If there are paths to open, open a workspace for each grouping of paths
@@ -931,7 +931,7 @@ async fn open_local_workspace(
     // When only diff paths are provided (no regular paths), add the CLI's
     // working directory so the workspace opens with the right context.
     // Note: must use the CLI process's cwd (forwarded via `cli_cwd`), not
-    // `std::env::current_dir()`, since the Zed app process's cwd is typically
+    // `std::env::current_dir()`, since the LEAD app process's cwd is typically
     // `/` on macOS bundles or the launch dir of an already-running instance.
     if !user_provided_paths
         && !diff_paths.is_empty()
@@ -1728,7 +1728,7 @@ mod tests {
             .unwrap();
 
         // Test case 2: Open a single file that does not exist yet,
-        // but tell Zed to add it to the current workspace
+        // but tell LEAD to add it to the current workspace
         open_workspace_file(
             path!("/root/file6.txt"),
             workspace::OpenOptions {
@@ -1751,7 +1751,7 @@ mod tests {
             .unwrap();
 
         // Test case 3: Open a single file that does not exist yet,
-        // but tell Zed to NOT add it to the current workspace
+        // but tell LEAD to NOT add it to the current workspace
         open_workspace_file(
             path!("/root/file7.txt"),
             workspace::OpenOptions {
@@ -2311,7 +2311,7 @@ mod tests {
     }
 
     /// Runs the real [`cli::run_cli_response_loop`] on an OS thread against
-    /// the Zed-side `handle_cli_connection` on the GPUI foreground executor,
+    /// the LEAD-side `handle_cli_connection` on the GPUI foreground executor,
     /// using `allow_parking` so the test scheduler tolerates cross-thread
     /// wakeups.
     ///

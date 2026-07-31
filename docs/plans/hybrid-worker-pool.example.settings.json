@@ -1,0 +1,137 @@
+// LEAD Hybrid Worker Pool — EXAMPLE ONLY.
+// Merge the pieces you need into your user settings.json.
+// Keys under agent.network_agent.workers are the target schema; runtime may
+// ignore them until the feature is implemented. Replace every PLACEHOLDER.
+//
+// Scheduling:
+//   "pool"         — strategy 1: assign each spawn_agent to a free worker
+//   "round_robin"  — strategy 2a: cycle workers in order
+//   "least_busy"   — strategy 2b (recommended): lowest load / capacity ratio
+//
+// See docs/plans/hybrid-worker-pool.md for the full design.
+
+{
+  "agent": {
+    "default_model": {
+      "provider": "lmstudio",
+      "model": "PLACEHOLDER_LOCAL_OR_PRIMARY_WORKER_MODEL"
+    },
+
+    "network_agent": {
+      "enabled": true,
+      "model": "PLACEHOLDER_ORCHESTRATOR_MODEL",
+      "delegation_mode": "balanced",
+
+      "workers": {
+        "scheduling": "least_busy",
+        "max_workers": 10,
+        // Also treat agent.default_model as a member of the pool
+        "include_default_model": true,
+        "endpoints": [
+          {
+            "id": "worker-lan-21",
+            "provider": "worker-lan-21",
+            "model": "PLACEHOLDER_MODEL_ON_WORKER_A",
+            "max_concurrent": 1,
+            "enabled": true
+          },
+          {
+            "id": "worker-lan-22",
+            "provider": "worker-lan-22",
+            "model": "PLACEHOLDER_MODEL_ON_WORKER_B",
+            "max_concurrent": 1,
+            "enabled": true
+          },
+          {
+            "id": "worker-lan-23",
+            "provider": "worker-lan-23",
+            "model": "PLACEHOLDER_MODEL_ON_WORKER_C",
+            "max_concurrent": 1,
+            "enabled": false
+          }
+        ]
+      }
+    },
+
+    "auto_thread_rollover": {
+      "enabled": true,
+      "context_fraction": 0.6
+    }
+  },
+
+  "language_models": {
+    "openai_compatible": {
+      // Orchestrator (existing Hybrid reserved id)
+      "network-agent": {
+        "api_url": "http://PLACEHOLDER_ORCHESTRATOR_HOST:1234/v1",
+        "available_models": [
+          {
+            "name": "PLACEHOLDER_ORCHESTRATOR_MODEL",
+            "max_tokens": 131072,
+            "max_output_tokens": 16384,
+            "max_completion_tokens": 16384,
+            "capabilities": {
+              "tools": true,
+              "images": false,
+              "parallel_tool_calls": false,
+              "prompt_cache_key": false
+            }
+          }
+        ]
+      },
+
+      // Worker boxes — one openai_compatible provider key per machine
+      "worker-lan-21": {
+        "api_url": "http://192.168.1.21:1234/v1",
+        "available_models": [
+          {
+            "name": "PLACEHOLDER_MODEL_ON_WORKER_A",
+            "max_tokens": 131072,
+            "max_output_tokens": 16384,
+            "max_completion_tokens": 16384,
+            "capabilities": {
+              "tools": true,
+              "images": false,
+              "parallel_tool_calls": false,
+              "prompt_cache_key": false
+            }
+          }
+        ]
+      },
+      "worker-lan-22": {
+        "api_url": "http://192.168.1.22:1234/v1",
+        "available_models": [
+          {
+            "name": "PLACEHOLDER_MODEL_ON_WORKER_B",
+            "max_tokens": 131072,
+            "max_output_tokens": 16384,
+            "max_completion_tokens": 16384,
+            "capabilities": {
+              "tools": true,
+              "images": false,
+              "parallel_tool_calls": false,
+              "prompt_cache_key": false
+            }
+          }
+        ]
+      },
+      "worker-lan-23": {
+        "api_url": "http://192.168.1.23:1234/v1",
+        "available_models": [
+          {
+            "name": "PLACEHOLDER_MODEL_ON_WORKER_C",
+            "max_tokens": 131072,
+            "max_output_tokens": 16384,
+            "max_completion_tokens": 16384,
+            "capabilities": {
+              "tools": true,
+              "images": false,
+              "parallel_tool_calls": false,
+              "prompt_cache_key": false
+            }
+          }
+        ]
+      }
+    }
+  }
+}

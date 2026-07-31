@@ -321,7 +321,7 @@ mod tests {
             parsed_remote,
             ParsedGitRemote {
                 owner: "zed-industries".into(),
-                repo: "zed".into(),
+                repo: "LEAD".into(),
             }
         );
     }
@@ -336,7 +336,7 @@ mod tests {
             parsed_remote,
             ParsedGitRemote {
                 owner: "zed-industries".into(),
-                repo: "zed".into(),
+                repo: "LEAD".into(),
             }
         );
     }
@@ -354,7 +354,7 @@ mod tests {
             parsed_remote,
             ParsedGitRemote {
                 owner: "zed-industries".into(),
-                repo: "zed".into(),
+                repo: "LEAD".into(),
             }
         );
     }
@@ -371,7 +371,7 @@ mod tests {
             parsed_remote,
             ParsedGitRemote {
                 owner: "group/subgroup".into(),
-                repo: "zed".into(),
+                repo: "LEAD".into(),
             }
         );
     }
@@ -381,7 +381,7 @@ mod tests {
         let permalink = Gitlab::public_instance().build_permalink(
             ParsedGitRemote {
                 owner: "zed-industries".into(),
-                repo: "zed".into(),
+                repo: "LEAD".into(),
             },
             BuildPermalinkParams::new(
                 "e6ebe7974deb6bb6cc0e2595c8ec31f0c71084b7",
@@ -399,7 +399,7 @@ mod tests {
         let permalink = Gitlab::public_instance().build_permalink(
             ParsedGitRemote {
                 owner: "zed-industries".into(),
-                repo: "zed".into(),
+                repo: "LEAD".into(),
             },
             BuildPermalinkParams::new(
                 "e6ebe7974deb6bb6cc0e2595c8ec31f0c71084b7",
@@ -417,7 +417,7 @@ mod tests {
         let permalink = Gitlab::public_instance().build_permalink(
             ParsedGitRemote {
                 owner: "zed-industries".into(),
-                repo: "zed".into(),
+                repo: "LEAD".into(),
             },
             BuildPermalinkParams::new(
                 "e6ebe7974deb6bb6cc0e2595c8ec31f0c71084b7",
@@ -434,7 +434,7 @@ mod tests {
     fn test_build_gitlab_create_pr_url() {
         let remote = ParsedGitRemote {
             owner: "zed-industries".into(),
-            repo: "zed".into(),
+            repo: "LEAD".into(),
         };
 
         let provider = Gitlab::public_instance();
@@ -457,7 +457,7 @@ mod tests {
         let permalink = gitlab.build_permalink(
             ParsedGitRemote {
                 owner: "zed-industries".into(),
-                repo: "zed".into(),
+                repo: "LEAD".into(),
             },
             BuildPermalinkParams::new(
                 "e6ebe7974deb6bb6cc0e2595c8ec31f0c71084b7",
@@ -478,7 +478,7 @@ mod tests {
         let permalink = gitlab.build_permalink(
             ParsedGitRemote {
                 owner: "zed-industries".into(),
-                repo: "zed".into(),
+                repo: "LEAD".into(),
             },
             BuildPermalinkParams::new(
                 "b2efec9824c45fcc90c9a7eb107a50d1772a60aa",
@@ -495,7 +495,7 @@ mod tests {
     fn test_build_create_pull_request_url() {
         let remote = ParsedGitRemote {
             owner: "zed-industries".into(),
-            repo: "zed".into(),
+            repo: "LEAD".into(),
         };
 
         let github = Gitlab::public_instance();
@@ -524,7 +524,7 @@ mod tests {
     fn test_extract_merge_request_from_squash_commit() {
         let remote = ParsedGitRemote {
             owner: "zed-industries".into(),
-            repo: "zed".into(),
+            repo: "LEAD".into(),
         };
 
         let provider = Gitlab::public_instance();
@@ -544,7 +544,7 @@ mod tests {
     fn test_extract_merge_request_from_merge_commit() {
         let remote = ParsedGitRemote {
             owner: "zed-industries".into(),
-            repo: "zed".into(),
+            repo: "LEAD".into(),
         };
 
         let provider = Gitlab::public_instance();
@@ -585,7 +585,7 @@ mod tests {
     fn test_extract_merge_request_no_match() {
         let remote = ParsedGitRemote {
             owner: "zed-industries".into(),
-            repo: "zed".into(),
+            repo: "LEAD".into(),
         };
 
         let provider = Gitlab::public_instance();

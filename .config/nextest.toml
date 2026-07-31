@@ -46,3 +46,9 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 [[profile.default.overrides]]
 filter =  'package(editor) and test(test_random_blocks)'
 slow-timeout = { period = "300s", terminate-after = 1 }
+
+# Tool-call smoke evals run several live model completions per test; local
+# models can take minutes for the full case list.
+[[profile.default.overrides]]
+filter = 'package(agent) and test(eval_tool_call_smoke)'
+slow-timeout = { period = "1200s", terminate-after = 1 }

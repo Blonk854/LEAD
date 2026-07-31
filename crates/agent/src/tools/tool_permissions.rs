@@ -71,7 +71,7 @@ pub async fn canonicalize_worktree_roots<C: gpui::AppContext>(
 ///
 /// Note: intermediate directories *can* be symlinks (not just leaf entries),
 /// so we must walk the full ancestor chain. For example:
-///   `ln -s /external/config /project/.zed`
+///   `ln -s /external/config /project/.LEAD`
 /// makes `.zed` an intermediate symlink directory.
 async fn canonicalize_with_ancestors(path: &Path, fs: &dyn Fs) -> Option<PathBuf> {
     let mut current: Option<&Path> = Some(path);

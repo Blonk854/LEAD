@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use credentials_provider::CredentialsProvider;
 use fs::Fs;
 use futures::Stream;
@@ -28,6 +28,8 @@ use ui::{
     ButtonLike, ConfiguredApiCard, ElevationIndex, List, ListBulletItem, Tooltip, prelude::*,
 };
 use ui_input::InputField;
+
+use crate::provider::open_ai_compatible::normalize_local_openai_tool_parameters;
 
 use crate::AllLanguageModelSettings;
 use language_model::util::parse_tool_arguments;
@@ -337,22 +339,6 @@ pub struct LmStudioLanguageModel {
     state: Entity<State>,
 }
 
-/// LM Studio's OpenAI-compatible API requires `parameters.properties` to be an object.
-/// Schemars omits `properties` for unit structs (e.g. tools with no arguments).
-fn normalize_lmstudio_tool_parameters(schema: serde_json::Value) -> serde_json::Value {
-    let serde_json::Value::Object(mut map) = schema else {
-        return serde_json::json!({ "type": "object", "properties": {} });
-    };
-
-    if !map.contains_key("properties") {
-        map.insert("properties".into(), serde_json::json!({}));
-    }
-    if !map.contains_key("type") {
-        map.insert("type".into(), serde_json::json!("object"));
-    }
-    serde_json::Value::Object(map)
-}
-
 impl LmStudioLanguageModel {
     fn to_lmstudio_request(
         &self,
@@ -439,11 +425,12 @@ impl LmStudioLanguageModel {
             model: self.model.name.clone(),
             messages,
             stream: true,
+            stream_options: Some(lmstudio::StreamOptions::default()),
             max_tokens: Some(-1),
             stop: Some(request.stop),
             // In LM Studio you can configure specific settings you'd like to use for your model.
             // For example Qwen3 is recommended to be used with 0.7 temperature.
-            // It would be a bad UX to silently override these settings from Zed, so we pass no temperature as a default.
+            // It would be a bad UX to silently override these settings from LEAD, so we pass no temperature as a default.
             temperature: request.temperature.or(None),
             tools: request
                 .tools
@@ -452,7 +439,7 @@ impl LmStudioLanguageModel {
                     function: lmstudio::FunctionDefinition {
                         name: tool.name,
                         description: Some(tool.description),
-                        parameters: Some(normalize_lmstudio_tool_parameters(tool.input_schema)),
+                        parameters: Some(normalize_local_openai_tool_parameters(tool.input_schema)),
                     },
                 })
                 .collect(),
@@ -594,20 +581,33 @@ impl LmStudioEventMapper {
         &mut self,
         event: lmstudio::ResponseStreamEvent,
     ) -> Vec<Result<LanguageModelCompletionEvent, LanguageModelCompletionError>> {
+        let mut events = Vec::new();
+
+        // With `stream_options.include_usage`, LM Studio (like OpenAI) often
+        // ends the stream with a usage-only chunk that has an empty `choices`
+        // array. That is normal — treat it as usage, not an error.
+        if let Some(usage) = event.usage {
+            events.push(Ok(LanguageModelCompletionEvent::UsageUpdate(TokenUsage {
+                input_tokens: usage.prompt_tokens,
+                output_tokens: usage.completion_tokens,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+            })));
+        }
+
         let Some(choice) = event.choices.into_iter().next() else {
-            return vec![Err(LanguageModelCompletionError::from(anyhow!(
-                "Response contained no choices"
-            )))];
+            return events;
         };
 
-        let mut events = Vec::new();
-        if let Some(content) = choice.delta.content {
+        let delta = choice.delta.unwrap_or_default();
+
+        if let Some(content) = delta.content {
             self.assistant_text.push_str(&content);
             self.text_for_tool_extraction.push_str(&content);
             events.push(Ok(LanguageModelCompletionEvent::Text(content)));
         }
 
-        if let Some(reasoning_content) = choice.delta.reasoning_content {
+        if let Some(reasoning_content) = delta.reasoning_content {
             self.text_for_tool_extraction.push_str(&reasoning_content);
             events.push(Ok(LanguageModelCompletionEvent::Thinking {
                 text: reasoning_content,
@@ -615,7 +615,7 @@ impl LmStudioEventMapper {
             }));
         }
 
-        if let Some(tool_calls) = choice.delta.tool_calls {
+        if let Some(tool_calls) = delta.tool_calls {
             for tool_call in tool_calls {
                 let entry = self.tool_calls_by_index.entry(tool_call.index).or_default();
 
@@ -641,15 +641,6 @@ impl LmStudioEventMapper {
                     }
                 }
             }
-        }
-
-        if let Some(usage) = event.usage {
-            events.push(Ok(LanguageModelCompletionEvent::UsageUpdate(TokenUsage {
-                input_tokens: usage.prompt_tokens,
-                output_tokens: usage.completion_tokens,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-            })));
         }
 
         match choice.finish_reason.as_deref() {
@@ -686,9 +677,11 @@ impl LmStudioEventMapper {
                 }
             }
             Some("tool_calls") => {
-                events.extend(self.tool_calls_by_index.drain().map(|(_, tool_call)| {
-                    Ok(finish_lmstudio_tool_call(tool_call))
-                }));
+                events.extend(
+                    self.tool_calls_by_index
+                        .drain()
+                        .map(|(_, tool_call)| Ok(finish_lmstudio_tool_call(tool_call))),
+                );
 
                 events.push(Ok(LanguageModelCompletionEvent::Stop(StopReason::ToolUse)));
             }
@@ -711,6 +704,24 @@ struct RawToolCall {
 }
 
 fn finish_lmstudio_tool_call(tool_call: RawToolCall) -> LanguageModelCompletionEvent {
+    // A well-formed native call (clean tool name + JSON object arguments) must be
+    // accepted before any repair heuristics run: argument *values* routinely
+    // contain `<` (JSX, HTML, generics) or text resembling embedded tool calls,
+    // and must never be routed through the XML-repair path below.
+    if !tool_call.name.is_empty() && !tool_call.name.contains('<') {
+        if let Ok(input @ serde_json::Value::Object(_)) = parse_tool_arguments(&tool_call.arguments)
+        {
+            return LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
+                id: tool_call.id.into(),
+                name: tool_call.name.into(),
+                is_input_complete: true,
+                input,
+                raw_input: tool_call.arguments,
+                thought_signature: None,
+            });
+        }
+    }
+
     let blob = format!("{}{}", tool_call.name, tool_call.arguments);
 
     if let Some(repaired) =
@@ -976,7 +987,7 @@ impl ConfigurationView {
                 .child(self.api_key_editor.clone())
                 .child(
                     Label::new(format!(
-                        "You can also set the {API_KEY_ENV_VAR_NAME} environment variable and restart Zed."
+                        "You can also set the {API_KEY_ENV_VAR_NAME} environment variable and restart LEAD."
                     ))
                     .size(LabelSize::Small)
                     .color(Color::Muted),
@@ -1117,5 +1128,122 @@ impl Render for ConfigurationView {
                         }
                     }),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_only_chunk_with_empty_choices_is_not_an_error() {
+        let mut mapper = LmStudioEventMapper::new();
+        let events = mapper.map_event(lmstudio::ResponseStreamEvent {
+            created: 0,
+            model: "test".into(),
+            object: "chat.completion.chunk".into(),
+            choices: Vec::new(),
+            usage: Some(lmstudio::Usage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+            }),
+        });
+
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Ok(LanguageModelCompletionEvent::UsageUpdate(usage)) => {
+                assert_eq!(usage.input_tokens, 10);
+                assert_eq!(usage.output_tokens, 5);
+            }
+            other => panic!("expected UsageUpdate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn choice_without_delta_is_not_an_error() {
+        let mut mapper = LmStudioEventMapper::new();
+        let events = mapper.map_event(lmstudio::ResponseStreamEvent {
+            created: 0,
+            model: "test".into(),
+            object: "chat.completion.chunk".into(),
+            choices: vec![lmstudio::ChoiceDelta {
+                index: 0,
+                delta: None,
+                finish_reason: Some("stop".into()),
+            }],
+            usage: None,
+        });
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Ok(LanguageModelCompletionEvent::Stop(_)))),
+            "expected Stop from finish_reason=stop, got {events:?}"
+        );
+    }
+
+    fn finish(name: &str, arguments: &str) -> LanguageModelCompletionEvent {
+        finish_lmstudio_tool_call(RawToolCall {
+            id: "call_1".into(),
+            name: name.into(),
+            arguments: arguments.into(),
+        })
+    }
+
+    #[test]
+    fn valid_tool_call_with_angle_brackets_in_arguments_is_not_treated_as_xml() {
+        // Regression: JSX/HTML content in write_file arguments used to be routed
+        // through the XML-repair path and rejected as "failed to parse embedded
+        // XML tool call".
+        let arguments = r#"{"path":"app/src/App.tsx","content":"export const App = () => <div className=\"app\">Hello</div>;"}"#;
+        match finish("write_file", arguments) {
+            LanguageModelCompletionEvent::ToolUse(tool_use) => {
+                assert_eq!(tool_use.name.as_ref(), "write_file");
+                assert_eq!(tool_use.input["path"], "app/src/App.tsx");
+                assert!(tool_use.input["content"].as_str().unwrap().contains("<div"));
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn valid_tool_call_with_embedded_tool_call_lookalike_is_not_hijacked() {
+        // Content that *looks like* a JSON tool call must not replace the real one.
+        let arguments = r#"{"path":"fixture.json","content":"{\"name\": \"terminal\", \"arguments\": {\"command\": \"rm -rf /\"}}"}"#;
+        match finish("write_file", arguments) {
+            LanguageModelCompletionEvent::ToolUse(tool_use) => {
+                assert_eq!(tool_use.name.as_ref(), "write_file");
+                assert_eq!(tool_use.input["path"], "fixture.json");
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_xml_tool_name_is_still_repaired() {
+        let name = "<function=read_file>\n<parameter=path>\nCargo.toml\n</parameter>\n</function>";
+        match finish(name, "") {
+            LanguageModelCompletionEvent::ToolUse(tool_use) => {
+                assert_eq!(tool_use.name.as_ref(), "read_file");
+                assert_eq!(tool_use.input["path"], "Cargo.toml");
+            }
+            other => panic!("expected repaired ToolUse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unparseable_arguments_still_report_parse_error() {
+        match finish("write_file", "{\"path\": ") {
+            LanguageModelCompletionEvent::ToolUseJsonParseError { tool_name, .. } => {
+                assert_eq!(tool_name.as_ref(), "write_file");
+            }
+            LanguageModelCompletionEvent::ToolUse(tool_use) => {
+                // Acceptable alternative: the streamed-JSON fixer completed the
+                // object; it must at least preserve the tool name.
+                assert_eq!(tool_use.name.as_ref(), "write_file");
+            }
+            other => panic!("unexpected event {other:?}"),
+        }
     }
 }

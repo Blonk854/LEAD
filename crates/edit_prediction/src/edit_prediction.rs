@@ -3468,7 +3468,7 @@ fn merge_anchor_ranges(
 
 #[derive(Error, Debug)]
 #[error(
-    "You must update to Zed version {minimum_version} or higher to continue using edit predictions."
+    "You must update to LEAD version {minimum_version} or higher to continue using edit predictions."
 )]
 pub struct ZedUpdateRequiredError {
     minimum_version: Version,
@@ -3481,7 +3481,7 @@ pub(crate) struct CloudRequestTimeoutError;
 struct ZedPredictUpsell;
 
 fn is_upsell_dismissed(cx: &App) -> bool {
-    // To make this backwards compatible with older versions of Zed, we
+    // To make this backwards compatible with older versions of LEAD, we
     // check if the user has seen the previous Edit Prediction Onboarding
     // before, by checking the data collection choice which was written to
     // the database once the user clicked on "Accept and Enable"

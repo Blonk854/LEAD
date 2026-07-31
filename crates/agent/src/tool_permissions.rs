@@ -61,6 +61,27 @@ pub static HARDCODED_SECURITY_RULES: LazyLock<HardcodedSecurityRules> = LazyLock
                 false,
             )
             .expect("hardcoded regex should compile"),
+            // Windows drive formatting.
+            CompiledRegex::new(r"\bformat(?:\.com)?\s+[a-z]:", false)
+                .expect("hardcoded regex should compile"),
+            // cmd.exe recursive deletion of a drive root or protected OS directories.
+            CompiledRegex::new(
+                r#"\b(?:del|erase|rd|rmdir)\b[^\r\n]*\s(?:/s\b[^\r\n]*\s)?["']?[a-z]:[\\/](?:\*|windows(?:[\\/]|$)|program files(?: \(x86\))?(?:[\\/]|$)|programdata(?:[\\/]|$)|["']?\s*$)"#,
+                false,
+            )
+            .expect("hardcoded regex should compile"),
+            // PowerShell deletion of a drive root or protected OS directories.
+            CompiledRegex::new(
+                r#"\bremove-item\b[^\r\n]*(?:-recurse|-r)\b[^\r\n]*["']?[a-z]:[\\/](?:\*|windows(?:[\\/]|$)|program files(?: \(x86\))?(?:[\\/]|$)|programdata(?:[\\/]|$)|["']?\s*$)"#,
+                false,
+            )
+            .expect("hardcoded regex should compile"),
+            // Disk partitioning/wiping utilities are never appropriate for an agent.
+            CompiledRegex::new(
+                r"\b(?:diskpart|clear-disk|initialize-disk|remove-partition)\b",
+                false,
+            )
+            .expect("hardcoded regex should compile"),
         ],
     }
 });
@@ -317,7 +338,7 @@ impl ToolPermissionDecision {
                     // hidden sub-commands that bypass the allow patterns.
                     return ToolPermissionDecision::Deny(format!(
                         "The {} shell does not support \"always allow\" patterns for the terminal \
-                         tool because Zed cannot parse its command chaining syntax. Please remove \
+                         tool because LEAD cannot parse its command chaining syntax. Please remove \
                          the always_allow patterns from your tool_permissions settings, or switch \
                          to a POSIX-conforming shell.",
                         shell_kind
@@ -598,12 +619,15 @@ mod tests {
             message_editor_min_lines: 1,
             tool_permissions,
             sandbox_permissions: Default::default(),
+            full_access: Default::default(),
             show_turn_stats: false,
             show_merge_conflict_indicator: true,
             sidebar_side: Default::default(),
             thinking_display: Default::default(),
             network_agent: Default::default(),
             auto_thread_rollover: Default::default(),
+            anti_loop: Default::default(),
+            web_research: Default::default(),
         }
     }
 
@@ -1692,6 +1716,18 @@ mod tests {
         t("sudo rm -rf /").is_deny();
         t("sudo rm -rf /*").is_deny();
         t("sudo rm -rf --no-preserve-root /").is_deny();
+    }
+
+    #[test]
+    fn hardcoded_blocks_windows_system_destruction() {
+        t("format C:").is_deny();
+        t(r#"rd /s /q "C:\Windows""#).is_deny();
+        t(r#"del /f /s /q C:\*"#).is_deny();
+        t(r#"Remove-Item -Recurse -Force "C:\Program Files""#).is_deny();
+        t("diskpart").is_deny();
+
+        t(r#"del /q "C:\Users\person\scratch.txt""#).is_confirm();
+        t(r#"Remove-Item "C:\Users\person\scratch.txt""#).is_confirm();
     }
 
     #[test]

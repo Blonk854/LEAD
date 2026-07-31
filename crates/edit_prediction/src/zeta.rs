@@ -510,7 +510,7 @@ fn handle_api_response<T>(
                         move |cx| {
                             cx.new(|cx| {
                                 ErrorMessagePrompt::new(error_message.clone(), cx)
-                                    .with_link_button("Update Zed", "https://zed.dev/releases")
+                                    .with_link_button("Update LEAD", "https://zed.dev/releases")
                             })
                         },
                     );

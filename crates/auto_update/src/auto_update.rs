@@ -279,7 +279,7 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
     {
         drop(window.prompt(
             gpui::PromptLevel::Info,
-            "Zed was installed via a package manager.",
+            "LEAD was installed via a package manager.",
             Some(&message),
             &["Ok"],
             cx,
@@ -342,7 +342,7 @@ impl InstallerDir {
     async fn new() -> Result<Self> {
         Ok(Self(
             tempfile::Builder::new()
-                .prefix("zed-auto-update")
+                .prefix("LEAD-auto-update")
                 .tempdir()?,
         ))
     }
@@ -395,7 +395,7 @@ impl AutoUpdater {
         // On windows, executable files cannot be overwritten while they are
         // running, so we must wait to overwrite the application until quitting
         // or restarting. When quitting the app, we spawn the auto update helper
-        // to finish the auto update process after Zed exits. When restarting
+        // to finish the auto update process after LEAD exits. When restarting
         // the app after an update, we use `set_restart_path` to run the auto
         // update helper instead of the app, so that it can overwrite the app
         // and then spawn the new binary.
@@ -510,7 +510,7 @@ impl AutoUpdater {
         true
     }
 
-    // If you are packaging Zed and need to override the place it downloads SSH remotes from,
+    // If you are packaging LEAD and need to override the place it downloads SSH remotes from,
     // you can override this function. You should also update get_remote_server_release_url to return
     // Ok(None).
     pub async fn download_remote_server_release(
@@ -533,7 +533,7 @@ impl AutoUpdater {
             &this,
             release_channel,
             version,
-            "zed-remote-server",
+            "LEAD-remote-server",
             os,
             arch,
             cx,
@@ -550,7 +550,7 @@ impl AutoUpdater {
 
         if smol::fs::metadata(&version_path).await.is_err() {
             log::info!(
-                "downloading zed-remote-server {os} {arch} version {}",
+                "downloading LEAD-remote-server {os} {arch} version {}",
                 release.version
             );
             set_status("Downloading remote server", cx);
@@ -585,7 +585,7 @@ impl AutoUpdater {
         })?;
 
         let release =
-            Self::get_release_asset(&this, channel, version, "zed-remote-server", os, arch, cx)
+            Self::get_release_asset(&this, channel, version, "LEAD-remote-server", os, arch, cx)
                 .await?;
 
         Ok(Some(release.url))
@@ -674,7 +674,7 @@ impl AutoUpdater {
         });
 
         let fetched_release_data =
-            Self::get_release_asset(&this, release_channel, None, "zed", OS, ARCH, cx).await?;
+            Self::get_release_asset(&this, release_channel, None, "LEAD", OS, ARCH, cx).await?;
         let fetched_version = fetched_release_data.clone().version;
         let app_commit_sha = Ok(cx.update(|cx| AppCommitSha::try_global(cx).map(|sha| sha.full())));
         let newer_version = Self::check_if_fetched_version_is_newer(
@@ -984,7 +984,7 @@ async fn install_release_linux(
     let home_dir = PathBuf::from(env::var("HOME").context("no HOME env var set")?);
     let running_app_path = cx.update(|cx| cx.app_path())?;
 
-    let extracted = temp_dir.path().join("zed");
+    let extracted = temp_dir.path().join("LEAD");
     fs::create_dir_all(&extracted)
         .await
         .context("failed to create directory into which to extract update")?;
@@ -1012,12 +1012,12 @@ async fn install_release_linux(
     } else {
         String::default()
     };
-    let app_folder_name = format!("zed{}.app", suffix);
+    let app_folder_name = format!("LEAD{}.app", suffix);
 
     let from = extracted.join(&app_folder_name);
     let mut to = home_dir.join(".local");
 
-    let expected_suffix = format!("{}/libexec/zed-editor", app_folder_name);
+    let expected_suffix = format!("{}/libexec/LEAD-editor", app_folder_name);
 
     if let Some(prefix) = running_app_path
         .to_str()
@@ -1035,7 +1035,7 @@ async fn install_release_linux(
 
     anyhow::ensure!(
         output.status.success(),
-        "failed to copy Zed update from {:?} to {:?}: {:?}",
+        "failed to copy LEAD update from {:?} to {:?}: {:?}",
         from,
         to,
         String::from_utf8_lossy(&output.stderr)
@@ -1273,7 +1273,7 @@ mod tests {
             }
         );
 
-        dmg_tx.send("<fake-zed-update>".to_owned()).unwrap();
+        dmg_tx.send("<fake-LEAD-update>".to_owned()).unwrap();
 
         let tmp_dir = Arc::new(tempdir().unwrap());
 
@@ -1281,7 +1281,7 @@ mod tests {
             let tmp_dir = tmp_dir.clone();
             cx.set_global(InstallOverride(Rc::new(move |target_path, _cx| {
                 let tmp_dir = tmp_dir.clone();
-                let dest_path = tmp_dir.path().join("zed");
+                let dest_path = tmp_dir.path().join("LEAD");
                 std::fs::copy(&target_path, &dest_path)?;
                 Ok(Some(dest_path))
             })));
@@ -1305,8 +1305,8 @@ mod tests {
         let will_restart = cx.expect_restart();
         cx.update(|cx| cx.restart());
         let path = will_restart.await.unwrap().unwrap();
-        assert_eq!(path, tmp_dir.path().join("zed"));
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "<fake-zed-update>");
+        assert_eq!(path, tmp_dir.path().join("LEAD"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "<fake-LEAD-update>");
     }
 
     #[test]
