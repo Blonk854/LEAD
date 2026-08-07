@@ -86,6 +86,10 @@ pub struct AgentSettingsContent {
     ///
     /// Default: left
     pub dock: Option<DockPosition>,
+    /// Whether the agent panel should open automatically when a workspace has a folder.
+    ///
+    /// Default: true
+    pub starts_open: Option<bool>,
     /// Whether the agent panel should use flexible (proportional) sizing.
     ///
     /// Default: true
@@ -357,6 +361,14 @@ pub struct WebResearchSettingsContent {
     ///
     /// Default: 90
     pub research_wall_clock_secs: Option<u64>,
+    /// SERP HTML cache TTL in seconds (app-data disk cache).
+    ///
+    /// Default: 3600
+    pub cache_ttl_serp_secs: Option<u64>,
+    /// Fetched page cache TTL in seconds (app-data disk cache).
+    ///
+    /// Default: 604800 (7 days)
+    pub cache_ttl_page_secs: Option<u64>,
 }
 
 /// Configuration for automatic thread rollover and hand-off.
@@ -372,9 +384,10 @@ pub struct AutoThreadRolloverContent {
     /// Default: true
     pub enabled: Option<bool>,
     /// Fraction (0.0 - 1.0) of the model's context window at which a thread
-    /// rolls over into a fresh one. Lower values roll over sooner.
+    /// rolls over into a fresh one. Treated as a floor: LEAD may raise it so
+    /// rollover stays above auto-compaction for the active model.
     ///
-    /// Default: 0.75
+    /// Default: 0.5
     pub context_fraction: Option<f32>,
 }
 

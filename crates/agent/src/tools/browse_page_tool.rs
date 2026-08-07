@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use settings::Settings as _;
 use ui::SharedString;
 use util::markdown::{MarkdownEscaped, MarkdownInlineCode};
-use web_research::PageFetcher;
+use web_research::{PageFetcher, disk_cache_dir};
 
 use crate::{
     AgentTool, ToolCallEventStream, ToolInput, ToolPermissionContext, full_access_enabled,
@@ -107,10 +108,12 @@ impl AgentTool for BrowsePageTool {
             config.browser_fallback_enabled = true;
             // Force browser path even if HTTP would succeed.
             let url = input.url.clone();
+            let cancel = Arc::new(AtomicBool::new(false));
+            let cancel_flag = cancel.clone();
             let browse = cx.background_spawn(async move {
                 let fetcher = PageFetcher::new(http_client, config);
                 fetcher
-                    .fetch_via_browser(&url, &url, None)
+                    .fetch_via_browser(&url, &url, Some(cancel))
                     .await
                     .map(|page| page.model_output())
                     .map_err(|error| error.to_string())
@@ -119,6 +122,7 @@ impl AgentTool for BrowsePageTool {
             let text = futures::select! {
                 result = browse.fuse() => result?,
                 _ = event_stream.cancelled_by_user().fuse() => {
+                    cancel_flag.store(true, Ordering::SeqCst);
                     return Err("Browse cancelled by user".into());
                 }
             };
@@ -166,8 +170,9 @@ pub fn web_research_config_from_settings(
         request_timeout: Duration::from_millis(research.request_timeout_ms),
         max_concurrency: research.max_concurrency,
         per_host_delay: Duration::from_millis(research.per_host_delay_ms),
-        cache_ttl_serp: Duration::from_secs(3_600),
-        cache_ttl_page: Duration::from_secs(604_800),
+        cache_ttl_serp: Duration::from_secs(research.cache_ttl_serp_secs),
+        cache_ttl_page: Duration::from_secs(research.cache_ttl_page_secs),
+        cache_dir: Some(disk_cache_dir(paths::data_dir())),
         browser_fallback_enabled: research.browser_fallback_enabled,
         browser_profile_dir: Some(profile_dir),
         browser_download_dir: Some(download_dir),

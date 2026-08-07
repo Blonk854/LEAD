@@ -1661,8 +1661,8 @@ impl ThreadView {
     }
 
     /// After a turn completes, if the thread's context has filled past the
-    /// configured threshold, automatically roll the conversation into a fresh
-    /// thread (carrying any active goal) so the model keeps performing well.
+    /// effective rollover threshold (configured floor, raised above
+    /// auto-compaction when needed), automatically roll into a fresh thread.
     fn maybe_auto_rollover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let rollover = &AgentSettings::get_global(cx).auto_thread_rollover;
         if !rollover.enabled {
@@ -4466,6 +4466,16 @@ impl ThreadView {
 
         let trigger_color = match (prompt_input_mode, active_goal.as_ref().map(|g| g.status)) {
             (PromptInputMode::Goal, _) | (_, Some(GoalStatus::Active)) => Color::Accent,
+            // Terminal / limited goal states stay muted (not accent).
+            (
+                _,
+                Some(
+                    GoalStatus::Completed
+                    | GoalStatus::ContinuationLimited
+                    | GoalStatus::BudgetLimited
+                    | GoalStatus::Paused,
+                ),
+            ) => Color::Muted,
             _ => Color::Muted,
         };
 
@@ -4546,6 +4556,20 @@ impl ThreadView {
 
                                 if goal_status == GoalStatus::Active {
                                     menu =
+                                        menu.item(ContextMenuEntry::new("Complete Goal").handler({
+                                            let thread = thread.clone();
+                                            move |_window, cx| {
+                                                thread
+                                                    .update(cx, |thread, cx| {
+                                                        thread.apply_goal_command(
+                                                            GoalCommand::Complete,
+                                                            cx,
+                                                        );
+                                                    })
+                                                    .ok();
+                                            }
+                                        }));
+                                    menu =
                                         menu.item(ContextMenuEntry::new("Pause Goal").handler({
                                             let thread = thread.clone();
                                             move |_window, cx| {
@@ -4559,7 +4583,10 @@ impl ThreadView {
                                                     .ok();
                                             }
                                         }));
-                                } else if goal_status == GoalStatus::Paused {
+                                } else if matches!(
+                                    goal_status,
+                                    GoalStatus::Paused | GoalStatus::ContinuationLimited
+                                ) {
                                     menu =
                                         menu.item(ContextMenuEntry::new("Resume Goal").handler({
                                             let thread = thread.clone();

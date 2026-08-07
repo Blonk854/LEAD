@@ -29,6 +29,8 @@ pub const SUMMARIZE_THREAD_DETAILED_PROMPT: &str =
 pub const COMPACTION_PROMPT: &str = include_str!("prompts/compaction_prompt.txt");
 pub const GOAL_CHECKPOINT_PROMPT: &str = include_str!("prompts/goal_checkpoint_prompt.txt");
 pub const HANDOFF_PROMPT: &str = include_str!("prompts/handoff_prompt.txt");
+pub const JOURNAL_FACT_EXTRACT_PROMPT: &str =
+    include_str!("prompts/journal_fact_extract_prompt.txt");
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PanelLayout {
@@ -143,6 +145,7 @@ pub struct AgentSettings {
     pub enabled: bool,
     pub button: bool,
     pub dock: DockPosition,
+    pub starts_open: bool,
     pub flexible: bool,
     pub sidebar_side: SidebarDockPosition,
     pub default_width: Pixels,
@@ -199,6 +202,8 @@ pub struct WebResearchSettings {
     pub max_pages: usize,
     pub max_depth: usize,
     pub research_wall_clock_secs: u64,
+    pub cache_ttl_serp_secs: u64,
+    pub cache_ttl_page_secs: u64,
 }
 
 impl Default for WebResearchSettings {
@@ -219,6 +224,8 @@ impl Default for WebResearchSettings {
             max_pages: 6,
             max_depth: 1,
             research_wall_clock_secs: 90,
+            cache_ttl_serp_secs: 3_600,
+            cache_ttl_page_secs: 604_800,
         }
     }
 }
@@ -259,8 +266,10 @@ impl Default for AntiLoopSettings {
 /// Resolved configuration for automatic thread rollover and hand-off.
 ///
 /// When [`enabled`](Self::enabled) and the active thread's context exceeds
-/// [`context_fraction`](Self::context_fraction) of the model's window, LEAD
-/// rolls the conversation into a fresh thread seeded with a hand-off summary.
+/// the effective share of the model's window (the configured
+/// [`context_fraction`](Self::context_fraction) floor, raised above
+/// auto-compaction when needed), LEAD rolls the conversation into a fresh
+/// thread seeded with a hand-off summary.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AutoThreadRollover {
     pub enabled: bool,
@@ -271,7 +280,10 @@ impl Default for AutoThreadRollover {
     fn default() -> Self {
         Self {
             enabled: true,
-            context_fraction: 0.75,
+            // Floor preference; runtime raises this above auto-compaction via
+            // `effective_rollover_context_fraction`. Keep in sync with
+            // assets/settings/default.json.
+            context_fraction: 0.5,
         }
     }
 }
@@ -970,6 +982,7 @@ impl Settings for AgentSettings {
             enabled: agent.enabled.unwrap(),
             button: agent.button.unwrap(),
             dock: agent.dock.unwrap(),
+            starts_open: agent.starts_open.unwrap(),
             sidebar_side: agent.sidebar_side.unwrap(),
             default_width: px(agent.default_width.unwrap()),
             default_height: px(agent.default_height.unwrap()),
@@ -1114,6 +1127,14 @@ fn compile_web_research_settings(
             .research_wall_clock_secs
             .filter(|value| (15..=300).contains(value))
             .unwrap_or(defaults.research_wall_clock_secs),
+        cache_ttl_serp_secs: content
+            .cache_ttl_serp_secs
+            .filter(|value| (60..=86_400).contains(value))
+            .unwrap_or(defaults.cache_ttl_serp_secs),
+        cache_ttl_page_secs: content
+            .cache_ttl_page_secs
+            .filter(|value| (300..=30 * 24 * 60 * 60).contains(value))
+            .unwrap_or(defaults.cache_ttl_page_secs),
     }
 }
 
@@ -1975,10 +1996,11 @@ mod tests {
         project::DisableAiSettings::register(cx);
         AgentSettings::register(cx);
 
-        // Defaults: enabled with a 0.75 context fraction.
+        // Defaults: enabled with a 0.5 context-fraction floor (raised at
+        // runtime above auto-compaction when the model requires it).
         let defaults = &AgentSettings::get_global(cx).auto_thread_rollover;
         assert!(defaults.enabled);
-        assert_eq!(defaults.context_fraction, 0.75);
+        assert_eq!(defaults.context_fraction, 0.5);
 
         // User overrides are applied, and out-of-range fractions are clamped.
         SettingsStore::update_global(cx, |store, cx| {
@@ -2342,6 +2364,7 @@ mod tests {
             enabled: false,
             button: false,
             dock: settings::DockPosition::Right,
+            starts_open: false,
             flexible: true,
             default_width: gpui::px(300.),
             default_height: gpui::px(600.),

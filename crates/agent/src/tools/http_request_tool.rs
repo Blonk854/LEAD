@@ -1,16 +1,19 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use agent_client_protocol::schema as acp;
-use futures::{AsyncReadExt as _, FutureExt as _};
+use futures::FutureExt as _;
 use gpui::{App, AppContext as _, Task};
-use http_client::{AsyncBody, HttpClient as _, HttpClientWithUrl, Request};
+use http_client::{HttpClientWithUrl, Method};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ui::SharedString;
+use web_research::{SafeHttpOptions, ensure_public_http_url, safe_http_request};
 
 use crate::{AgentTool, ToolCallEventStream, ToolInput, ToolPermissionContext};
 
 const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
+const MAX_REDIRECTS: u32 = 5;
+const REQUEST_TIMEOUT: Duration = Duration::from_millis(15_000);
 
 /// Sends an HTTP request and returns its status, headers, and response body.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -73,17 +76,22 @@ impl AgentTool for HttpRequestTool {
             }
 
             let method = input.method.to_ascii_uppercase();
-            if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "PATCH" | "DELETE") {
-                return Err(
-                    "Unsupported HTTP method. Use GET, POST, PUT, PATCH, or DELETE.".into(),
-                );
-            }
+            let method = match method.as_str() {
+                "GET" => Method::GET,
+                "POST" => Method::POST,
+                "PUT" => Method::PUT,
+                "PATCH" => Method::PATCH,
+                "DELETE" => Method::DELETE,
+                _ => {
+                    return Err(
+                        "Unsupported HTTP method. Use GET, POST, PUT, PATCH, or DELETE.".into(),
+                    );
+                }
+            };
             let url = url::Url::parse(&input.url).map_err(|error| error.to_string())?;
-            if !matches!(url.scheme(), "http" | "https") {
-                return Err("Only http:// and https:// URLs are supported.".into());
-            }
+            ensure_public_http_url(&url).map_err(|error| format!("ssrf_blocked: {error}"))?;
 
-            if method != "GET" {
+            if method != Method::GET {
                 let authorize = cx.update(|cx| {
                     event_stream.authorize(
                         format!("{method} {url}"),
@@ -94,48 +102,32 @@ impl AgentTool for HttpRequestTool {
                 authorize.await.map_err(|error| error.to_string())?;
             }
 
-            let mut builder = Request::builder().method(method.as_str()).uri(url.as_str());
-            for (name, value) in input.headers {
-                builder = builder.header(name, value);
-            }
-            let request = builder
-                .body(input.body.map(AsyncBody::from).unwrap_or_default())
-                .map_err(|error| error.to_string())?;
-
+            let headers: Vec<(String, String)> = input.headers.into_iter().collect();
+            let body = input.body.map(|value| value.into_bytes());
             let request_task = cx.background_spawn(async move {
-                let mut response = client
-                    .send(request)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                let status = response.status();
-                let headers = response
-                    .headers()
-                    .iter()
-                    .map(|(name, value)| {
-                        format!("{}: {}", name, value.to_str().unwrap_or("<binary>"))
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let mut body = Vec::new();
-                response
-                    .body_mut()
-                    .take(MAX_RESPONSE_BYTES + 1)
-                    .read_to_end(&mut body)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                let truncated = body.len() as u64 > MAX_RESPONSE_BYTES;
-                body.truncate(MAX_RESPONSE_BYTES as usize);
-                let body = String::from_utf8_lossy(&body);
-                Ok::<_, String>(format!(
-                    "HTTP {}\n{}\n\n{}{}",
-                    status.as_u16(),
+                let options = SafeHttpOptions {
+                    method,
                     headers,
                     body,
-                    if truncated {
-                        "\n\n[response truncated at 1 MiB]"
-                    } else {
-                        ""
-                    }
+                    max_redirects: MAX_REDIRECTS,
+                    max_response_bytes: MAX_RESPONSE_BYTES,
+                    request_timeout: REQUEST_TIMEOUT,
+                    cancel: None,
+                    limiter: None,
+                };
+                let response = safe_http_request(&client, &url, options)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let headers = response
+                    .headers
+                    .iter()
+                    .map(|(name, value)| format!("{name}: {value}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let body = String::from_utf8_lossy(&response.body);
+                Ok::<_, String>(format!(
+                    "HTTP {}\n{}\n\n{}",
+                    response.status, headers, body
                 ))
             });
 

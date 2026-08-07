@@ -207,7 +207,10 @@ impl AgentTool for CreateDirectoryTool {
             let create_entry = project.update(cx, |project, cx| {
                 match project.find_project_path(&input.path, cx) {
                     Some(project_path) => Ok(project.create_entry(project_path, true, cx)),
-                    None => Err("Path to create was outside the project".to_string()),
+                    None => Err(format!(
+                        "Path to create was outside the project: `{}`. Use a project-relative path such as `notes` or `notes/subdir` (forward slashes preferred).",
+                        input.path
+                    )),
                 }
             })?;
 
@@ -248,6 +251,36 @@ mod tests {
             settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
             AgentSettings::override_global(settings, cx);
         });
+    }
+
+    #[gpui::test]
+    async fn test_create_directory_relative_path_in_empty_project(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/root/project"), json!({})).await;
+        let project = Project::test(fs.clone(), [path!("/root/project").as_ref()], cx).await;
+        cx.executor().run_until_parked();
+
+        let tool = Arc::new(CreateDirectoryTool::new(project));
+        let (event_stream, _event_rx) = ToolCallEventStream::test();
+        let result = cx
+            .update(|cx| {
+                tool.run(
+                    ToolInput::resolved(CreateDirectoryToolInput {
+                        path: "notes".into(),
+                    }),
+                    event_stream,
+                    cx,
+                )
+            })
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "create_directory notes should work in an empty single-worktree project: {result:?}"
+        );
+        assert!(fs.is_dir(path!("/root/project/notes").as_ref()).await);
     }
 
     #[gpui::test]

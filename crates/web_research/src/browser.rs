@@ -36,6 +36,8 @@ pub struct BrowserFetchRequest {
     pub profile_dir: PathBuf,
     pub download_dir: PathBuf,
     pub timeout: Duration,
+    /// Stop reading dump-dom stdout after this many bytes (+1 to detect oversize).
+    pub max_response_bytes: u64,
     pub cancel: Option<Arc<AtomicBool>>,
 }
 
@@ -229,15 +231,27 @@ pub fn fetch_rendered_html(request: &BrowserFetchRequest) -> Result<BrowserFetch
         .take()
         .ok_or_else(|| BrowserError::Failed("missing stdout".into()))?;
 
-    // Read stdout on a helper thread so we can poll cancel/timeout.
+    // Read stdout on a helper thread so we can poll cancel/timeout/size.
+    let max_bytes = request.max_response_bytes;
     let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<u8>, String>>();
     std::thread::spawn(move || {
         let mut buf = Vec::new();
         let mut reader = stdout;
-        let result = reader
-            .read_to_end(&mut buf)
-            .map(|_| buf)
-            .map_err(|error| error.to_string());
+        let mut chunk = [0u8; 8192];
+        let result = loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break Ok(buf),
+                Ok(n) => {
+                    if buf.len() as u64 + n as u64 > max_bytes {
+                        break Err(format!(
+                            "browser response exceeded max_response_bytes ({max_bytes})"
+                        ));
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                Err(error) => break Err(error.to_string()),
+            }
+        };
         let _ = tx.send(result);
     });
 
@@ -385,6 +399,7 @@ mod tests {
             profile_dir: root.path().join("profile"),
             download_dir: root.path().join("downloads"),
             timeout: Duration::from_secs(5),
+            max_response_bytes: 1024 * 1024,
             cancel: Some(cancel),
         })
         .unwrap_err();

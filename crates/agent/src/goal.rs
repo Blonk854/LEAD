@@ -33,6 +33,8 @@ pub enum GoalStatus {
     Active,
     Paused,
     BudgetLimited,
+    /// Hit the soft EndTurn continuation ceiling (local/small models).
+    ContinuationLimited,
     Completed,
 }
 
@@ -143,8 +145,11 @@ impl ThreadGoal {
         format!(
             "You are working toward an active goal. Do not stop until the success criteria are \
              verified.\n\nObjective: {}\n\nSuccess criteria: {}{}\n\nReview your progress, run \
-             any verification steps needed, and continue working. Only end your turn when the goal \
-             is fully achieved or you are genuinely blocked and need user input.",
+             any verification steps needed, and continue working.\n\nWhen the success criteria are \
+             fully met, call the `complete_goal` tool (this ends goal mode), then stop. Do not \
+             merely EndTurn — that will reinject a continuation. Marking `update_plan` steps \
+             completed is not the same as completing the goal. If you are genuinely blocked and \
+             need user input, stop and ask.",
             self.objective,
             self.success_criteria,
             self.checkpoint_context()
@@ -154,8 +159,9 @@ impl ThreadGoal {
     pub fn verification_prompt(&self) -> String {
         format!(
             "Before ending, verify the goal against its success criteria.\n\nObjective: {}\n\n\
-             Success criteria: {}{}\n\nRun the checks needed to confirm completion. If not met, \
-             continue working.",
+             Success criteria: {}{}\n\nRun the checks needed to confirm completion. If met, call \
+             `complete_goal` and stop — do not merely EndTurn. Marking `update_plan` steps \
+             completed is not goal completion. If not met, continue working.",
             self.objective,
             self.success_criteria,
             self.checkpoint_context()
@@ -173,6 +179,7 @@ pub enum GoalCommand {
     Status,
     Pause,
     Resume,
+    Complete,
     Clear,
 }
 
@@ -189,6 +196,7 @@ impl GoalCommand {
         match first {
             "pause" => GoalCommand::Pause,
             "resume" => GoalCommand::Resume,
+            "complete" | "done" => GoalCommand::Complete,
             "clear" => GoalCommand::Clear,
             "status" => GoalCommand::Status,
             _ => {
@@ -232,6 +240,8 @@ mod tests {
         assert_eq!(GoalCommand::parse(""), GoalCommand::Status);
         assert_eq!(GoalCommand::parse("pause"), GoalCommand::Pause);
         assert_eq!(GoalCommand::parse("clear"), GoalCommand::Clear);
+        assert_eq!(GoalCommand::parse("complete"), GoalCommand::Complete);
+        assert_eq!(GoalCommand::parse("done"), GoalCommand::Complete);
         assert_eq!(
             GoalCommand::parse("fix the failing tests"),
             GoalCommand::Set {
@@ -246,6 +256,14 @@ mod tests {
                 token_budget: Some(100000),
             }
         );
+    }
+
+    #[test]
+    fn test_prompts_instruct_complete_goal_tool() {
+        let goal = ThreadGoal::new("ship".into(), "tests pass".into(), None);
+        assert!(goal.continuation_prompt().contains("complete_goal"));
+        assert!(goal.verification_prompt().contains("complete_goal"));
+        assert!(goal.continuation_prompt().contains("update_plan"));
     }
 
     #[test]

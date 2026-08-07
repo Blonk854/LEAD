@@ -1574,6 +1574,7 @@ mod tests {
             "open",
             "read_journal",
             "append_to_journal",
+            "complete_goal",
             "rag_ingest",
             "rag_search",
             "rename_symbol",

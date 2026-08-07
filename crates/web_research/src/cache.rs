@@ -70,3 +70,34 @@ fn now_ms() -> u64 {
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_put_roundtrip_respects_ttl() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = DiskCache::open(root.path().to_path_buf()).unwrap();
+        let page = CachedPage {
+            url: "https://example.com/a".into(),
+            stored_at_unix_ms: now_ms(),
+            content_type: Some("text/html".into()),
+            markdown: "# Hello".into(),
+            content_sha256: "abcd".into(),
+        };
+        cache.put(&page).unwrap();
+        assert!(
+            cache
+                .get("https://example.com/a", Duration::from_secs(60))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            cache
+                .get("https://example.com/a", Duration::from_millis(0))
+                .unwrap()
+                .is_none()
+        );
+    }
+}

@@ -129,7 +129,12 @@ impl AgentTool for WebSearchTool {
                 .map_err(|e| WebSearchToolOutput::Error { error: e.to_string() })?;
 
             let prepared = cx.update(|cx| {
-                let Some(provider) = WebSearchRegistry::read_global(cx).active_provider() else {
+                let Some(registry) = WebSearchRegistry::try_read_global(cx) else {
+                    return Err(WebSearchToolOutput::Error {
+                        error: "Web search is not initialized.".to_string(),
+                    });
+                };
+                let Some(provider) = registry.active_provider() else {
                     return Err(WebSearchToolOutput::Error {
                         error: "Web search is not available.".to_string(),
                     });

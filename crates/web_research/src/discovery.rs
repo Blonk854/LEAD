@@ -128,10 +128,22 @@ pub fn extract_result_links(
 
 pub fn looks_like_challenge(html: &str) -> bool {
     let lower = html.to_ascii_lowercase();
-    lower.contains("captcha")
-        || lower.contains("cf-browser-verification")
+    // Prefer structural markers over English copy so SERP result snippets
+    // mentioning "captcha" / "verifying your request" do not discard real hits.
+    lower.contains("cf-browser-verification")
+        || lower.contains("anubis_challenge")
+        || lower.contains("challenges.cloudflare.com/turnstile")
+        || lower.contains("id=\"turnstile-widget\"")
         || lower.contains("unusual traffic")
         || lower.contains("enable javascript and cookies")
+        // Keep bare "captcha" only when paired with challenge chrome, not alone
+        // in a normal results page body.
+        || (lower.contains("captcha")
+            && (lower.contains("turnstile")
+                || lower.contains("cf-")
+                || lower.contains("g-recaptcha")
+                || lower.contains("hcaptcha")
+                || lower.contains("please solve")))
 }
 
 fn strip_tags(input: &str) -> String {
@@ -194,7 +206,7 @@ mod tests {
     #[test]
     fn failover_skips_challenge() {
         let discovery = FailoverDiscovery::new(vec![Box::new(DummyAdapter)]);
-        let challenge = "<html>captcha please</html>";
+        let challenge = r#"<html><div id="turnstile-widget"></div>captcha please</html>"#;
         let ok = r#"<a href="https://docs.rs/gpui">gpui docs</a>"#;
         let outcome = discovery
             .parse_with_failover("gpui", &[("dummy", challenge), ("dummy", ok)])

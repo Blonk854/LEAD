@@ -1015,6 +1015,8 @@
     "button": true,
     // Where to dock the agent panel. Can be 'left', 'right' or 'bottom'.
     "dock": "right",
+    // Whether the agent panel should open automatically when a workspace has a folder.
+    "starts_open": true,
     // Whether the agent panel should use flexible (proportional) sizing.
     //
     // Default: true
@@ -1117,11 +1119,12 @@
     },
     // Automatically roll a too-long conversation into a fresh thread, seeded
     // with a robust hand-off summary, then auto-continue (all profiles).
-    // `context_fraction` is the share of the model's context window at which
-    // rollover triggers (0.1 - 0.95).
+    // `context_fraction` is a floor (0.1 - 0.95). At runtime LEAD raises it
+    // when needed so rollover sits just above auto-compaction for the active
+    // model (large windows with a 40k remaining compact budget need ~0.8+).
     "auto_thread_rollover": {
       "enabled": true,
-      "context_fraction": 0.6
+      "context_fraction": 0.5
     },
     // Detect repetitive LM Studio output, recover once with a corrective
     // instruction, then stop the turn if repetition continues.
@@ -1154,7 +1157,9 @@
       "browser_timeout_secs": 45,
       "max_pages": 6,
       "max_depth": 1,
-      "research_wall_clock_secs": 90
+      "research_wall_clock_secs": 90,
+      "cache_ttl_serp_secs": 3600,
+      "cache_ttl_page_secs": 604800
     },
     "default_profile": "hybrid",
     "profiles": {
@@ -1166,6 +1171,7 @@
           "grep": true,
           "list_directory": true,
           "append_to_journal": true,
+          "complete_goal": true,
           "read_journal": true,
           "rag_ingest": true,
           "rag_search": true,
@@ -1191,6 +1197,7 @@
         "enable_all_context_servers": true,
         "tools": {
           "append_to_journal": true,
+          "complete_goal": true,
           "apply_code_action": true,
           "copy_path": true,
           "create_directory": true,
@@ -1232,6 +1239,7 @@
         "enable_all_context_servers": true,
         "tools": {
           "append_to_journal": true,
+          "complete_goal": true,
           "apply_code_action": true,
           "computer_use": true,
           "copy_path": true,
@@ -1272,6 +1280,7 @@
         "name": "Write",
         "enable_all_context_servers": true,
         "tools": {
+          "complete_goal": true,
           "copy_path": true,
           "create_directory": true,
           "create_thread": true,
@@ -1938,6 +1947,8 @@
     "shell": "system",
     // Where to dock terminals panel. Can be `left`, `right`, `bottom`.
     "dock": "bottom",
+    // Whether the terminal panel should open automatically when a workspace has a folder.
+    "starts_open": true,
     // Whether the terminal panel should use flexible (proportional) sizing.
     //
     // Default: true

@@ -11,7 +11,10 @@ use std::sync::Arc;
 /// Appends a dated note to the project journal for durable, cross-session memory.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct AppendToJournalToolInput {
-    /// The note to append to the project journal.
+    /// Durable note(s) to append as one timestamped journal section.
+    /// Prefer a batch of 1–8 lines in the form `TAG | claim | evidence?`
+    /// (tags: GOAL, DEC, PATH, API, FAIL, FIX, NEXT, URL, PREF, BLOCK).
+    /// Multiple facts in one call are preferred over many separate calls.
     pub note: String,
 }
 
@@ -83,18 +86,43 @@ impl AgentTool for AppendToJournalTool {
             let roots = cx.update(|cx| worktree_roots(&self.project, cx));
             if roots.is_empty() {
                 return Err(AppendToJournalToolOutput::Error {
-                    error: "No project worktree is open.".into(),
+                    error: "No directory worktree is open (file-only tabs cannot host the project journal).".into(),
                 });
             }
 
+            let mut total_written = 0usize;
+            let mut total_dupes = 0usize;
             for root in &roots {
-                append_journal(root, note).map_err(|error| AppendToJournalToolOutput::Error {
-                    error: format!("Failed to append journal note: {error:#}"),
-                })?;
+                let outcome =
+                    append_journal(root, note).map_err(|error| AppendToJournalToolOutput::Error {
+                        error: format!("Failed to append journal note: {error:#}"),
+                    })?;
+                total_written = total_written.saturating_add(outcome.lines_written);
+                total_dupes = total_dupes.saturating_add(outcome.duplicates_skipped);
             }
 
+            if total_written == 0 {
+                if total_dupes > 0 {
+                    return Ok(AppendToJournalToolOutput::Success {
+                        message: format!(
+                            "No new journal facts saved ({total_dupes} duplicate(s) skipped)."
+                        ),
+                    });
+                }
+                return Ok(AppendToJournalToolOutput::Success {
+                    message: "Nothing new to save to the project journal.".into(),
+                });
+            }
+
+            let dupe_note = if total_dupes > 0 {
+                format!(" ({total_dupes} duplicate(s) skipped)")
+            } else {
+                String::new()
+            };
             Ok(AppendToJournalToolOutput::Success {
-                message: "Saved a note to the project journal.".into(),
+                message: format!(
+                    "Saved {total_written} journal line(s) in one section{dupe_note}."
+                ),
             })
         })
     }
@@ -165,7 +193,7 @@ impl AgentTool for ReadJournalTool {
             let roots = cx.update(|cx| worktree_roots(&self.project, cx));
             if roots.is_empty() {
                 return Err(ReadJournalToolOutput::Error {
-                    error: "No project worktree is open.".into(),
+                    error: "No directory worktree is open (file-only tabs cannot host the project journal).".into(),
                 });
             }
 

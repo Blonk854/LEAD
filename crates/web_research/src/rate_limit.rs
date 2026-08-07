@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
@@ -21,6 +21,8 @@ struct HostState {
     strike: u32,
 }
 
+static PROCESS_SHARED_MAP: OnceLock<Arc<Mutex<HashMap<String, HostState>>>> = OnceLock::new();
+
 impl Default for HostRateLimiter {
     fn default() -> Self {
         Self::new(Duration::from_millis(1_000))
@@ -31,6 +33,20 @@ impl HostRateLimiter {
     pub fn new(delay: Duration) -> Self {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
+            delay,
+            max_delay: delay.saturating_mul(8).max(delay),
+        }
+    }
+
+    /// Process-wide limiter map so search / fetch / browse share host spacing.
+    ///
+    /// Delay comes from the caller's config (settings can change between calls).
+    pub fn process_shared(delay: Duration) -> Self {
+        let inner = PROCESS_SHARED_MAP
+            .get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+            .clone();
+        Self {
+            inner,
             delay,
             max_delay: delay.saturating_mul(8).max(delay),
         }
@@ -49,41 +65,52 @@ impl HostRateLimiter {
         delay
     }
 
-    /// Block until this host may be contacted again.
-    ///
-    /// Intended to run on a background task (not the GPUI foreground thread).
-    pub fn wait_turn_blocking(&self, host: &str) {
+    fn sleep_for(&self, host: &str) -> Option<Duration> {
         let key = host.to_ascii_lowercase();
+        let mut map = self.inner.lock();
+        let now = Instant::now();
+        if let Some(state) = map.get(&key).copied() {
+            let delay = self.current_delay(state.strike);
+            if now < state.last + delay {
+                Some((state.last + delay) - now)
+            } else {
+                map.insert(
+                    key,
+                    HostState {
+                        last: now,
+                        strike: state.strike,
+                    },
+                );
+                None
+            }
+        } else {
+            map.insert(
+                key,
+                HostState {
+                    last: now,
+                    strike: 0,
+                },
+            );
+            None
+        }
+    }
+
+    /// Async wait until this host may be contacted again.
+    pub async fn wait_turn(&self, host: &str) {
         loop {
-            let sleep_for = {
-                let mut map = self.inner.lock();
-                let now = Instant::now();
-                if let Some(state) = map.get(&key).copied() {
-                    let delay = self.current_delay(state.strike);
-                    if now < state.last + delay {
-                        Some((state.last + delay) - now)
-                    } else {
-                        map.insert(
-                            key.clone(),
-                            HostState {
-                                last: now,
-                                strike: state.strike,
-                            },
-                        );
-                        None
-                    }
-                } else {
-                    map.insert(
-                        key.clone(),
-                        HostState {
-                            last: now,
-                            strike: 0,
-                        },
-                    );
-                    None
+            match self.sleep_for(host) {
+                Some(duration) => {
+                    smol::Timer::after(duration).await;
                 }
-            };
-            match sleep_for {
+                None => return,
+            }
+        }
+    }
+
+    /// Block until this host may be contacted again (tests / sync contexts).
+    pub fn wait_turn_blocking(&self, host: &str) {
+        loop {
+            match self.sleep_for(host) {
                 Some(duration) => std::thread::sleep(duration),
                 None => return,
             }
@@ -111,6 +138,11 @@ impl HostRateLimiter {
             state.last = Instant::now();
         }
     }
+
+    /// Whether two limiters share the same host map (process-shared or clones).
+    pub fn shares_map_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
 }
 
 #[cfg(test)]
@@ -128,9 +160,8 @@ mod tests {
 
     #[test]
     fn penalize_increases_spacing() {
-        let limiter = HostRateLimiter::new(Duration::from_millis(20)).with_max_delay(
-            Duration::from_millis(200),
-        );
+        let limiter =
+            HostRateLimiter::new(Duration::from_millis(20)).with_max_delay(Duration::from_millis(200));
         limiter.wait_turn_blocking("slow.test");
         limiter.penalize("slow.test");
         limiter.penalize("slow.test");
@@ -138,5 +169,12 @@ mod tests {
         limiter.wait_turn_blocking("slow.test");
         // Two strikes → 20ms * 4 = 80ms base gap.
         assert!(start.elapsed() >= Duration::from_millis(60));
+    }
+
+    #[test]
+    fn process_shared_limiters_share_map() {
+        let a = HostRateLimiter::process_shared(Duration::from_millis(10));
+        let b = HostRateLimiter::process_shared(Duration::from_millis(50));
+        assert!(a.shares_map_with(&b));
     }
 }

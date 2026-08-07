@@ -1201,21 +1201,10 @@ fn register_actions(
                                 app_state,
                                 cx,
                                 |workspace, window, cx| {
+                                    // Leave the pane empty so the LEAD welcome
+                                    // page shows instead of a blank untitled buffer.
                                     cx.activate(true);
-                                    let project = workspace.project().clone();
-                                    let buffer = project.update(cx, |project, cx| {
-                                        project.create_local_buffer("", None, true, cx)
-                                    });
-                                    let editor = cx.new(|cx| {
-                                        Editor::for_buffer(buffer, Some(project), window, cx)
-                                    });
-                                    workspace.add_item_to_active_pane(
-                                        Box::new(editor),
-                                        None,
-                                        true,
-                                        window,
-                                        cx,
-                                    );
+                                    let _ = (workspace, window);
                                 },
                             )
                         })?;

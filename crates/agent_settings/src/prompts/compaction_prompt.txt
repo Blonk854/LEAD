@@ -7,4 +7,16 @@ Include:
 - Next: the specific steps that remain
 - Pitfalls: anything tried that didn't work
 
+Web research retention rules:
+- Keep verified URLs, versions, package names, `research_web` session ids, domain allowlists, and decisions drawn from the web.
+- Drop raw `<web_content>` blocks, full fetched page bodies, and SERP dump text. Citations and short quotes are enough.
+
 Write it so the next agent can act without re-asking the user. Be concise and well-structured.
+
+After the handoff, if any durable facts should survive into the project journal, append a final block exactly like this (1–8 lines, no prose):
+
+FACTS
+TAG | claim | evidence?
+
+Allowed tags: GOAL, DEC, PATH, API, FAIL, FIX, NEXT, URL, PREF, BLOCK.
+If nothing durable happened beyond the handoff prose, omit the FACTS block entirely.

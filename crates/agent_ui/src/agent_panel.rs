@@ -5145,6 +5145,19 @@ impl Panel for AgentPanel {
         agent_panel_dock_position(cx)
     }
 
+    fn starts_open(&self, _window: &Window, cx: &App) -> bool {
+        let settings = AgentSettings::get_global(cx);
+        if !settings.enabled || !settings.starts_open {
+            return false;
+        }
+        let project = self.project.read(cx);
+        project.visible_worktrees(cx).any(|tree| {
+            tree.read(cx)
+                .root_entry()
+                .is_some_and(|entry| entry.is_dir())
+        })
+    }
+
     fn position_is_valid(&self, position: DockPosition) -> bool {
         position != DockPosition::Bottom
     }

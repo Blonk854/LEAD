@@ -2,17 +2,14 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::Context as _;
-use futures::AsyncReadExt as _;
-use http_client::{
-    AsyncBody, HttpClient, HttpClientWithUrl, HttpRequestExt as _, Method, RedirectPolicy, Request,
-};
 use thiserror::Error;
 
 use crate::browser::{BrowserError, BrowserFetchRequest, fetch_rendered_html};
+use crate::cache::{CachedPage, DiskCache};
 use crate::config::WebResearchConfig;
 use crate::envelope::{content_sha256, render_web_envelope};
-use crate::extract::{ExtractedPage, extract_page_content};
+use crate::extract::{ExtractedPage, extract_page_content, heading_outline};
+use crate::http::{RESEARCH_ACCEPT, SafeHttpError, SafeHttpOptions, safe_http_get};
 use crate::rate_limit::HostRateLimiter;
 use crate::url_policy::{canonicalize_url, ensure_public_http_url, normalize_url_string};
 
@@ -32,6 +29,8 @@ pub enum FetchError {
     NeedsBrowser(String),
     #[error("browser_unavailable: {0}")]
     BrowserUnavailable(String),
+    #[error("timeout")]
+    Timeout,
     #[error("{0}")]
     Other(String),
 }
@@ -39,6 +38,20 @@ pub enum FetchError {
 impl From<anyhow::Error> for FetchError {
     fn from(value: anyhow::Error) -> Self {
         Self::Other(value.to_string())
+    }
+}
+
+impl From<SafeHttpError> for FetchError {
+    fn from(value: SafeHttpError) -> Self {
+        match value {
+            SafeHttpError::SsrfBlocked(message) => Self::SsrfBlocked(message),
+            SafeHttpError::Timeout => Self::Timeout,
+            SafeHttpError::Cancelled => Self::Other("cancelled".into()),
+            SafeHttpError::ResponseTooLarge(limit) => Self::Other(format!(
+                "response exceeded max_response_bytes ({limit})"
+            )),
+            SafeHttpError::Other(message) => Self::Other(message),
+        }
     }
 }
 
@@ -100,19 +113,32 @@ pub enum FetchOutcome {
 }
 
 pub struct PageFetcher {
-    http_client: Arc<HttpClientWithUrl>,
+    http_client: Arc<http_client::HttpClientWithUrl>,
     config: WebResearchConfig,
     limiter: HostRateLimiter,
+    cache: Option<DiskCache>,
 }
 
 impl PageFetcher {
-    pub fn new(http_client: Arc<HttpClientWithUrl>, config: WebResearchConfig) -> Self {
-        let limiter = HostRateLimiter::new(config.per_host_delay);
+    pub fn new(
+        http_client: Arc<http_client::HttpClientWithUrl>,
+        config: WebResearchConfig,
+    ) -> Self {
+        let limiter = HostRateLimiter::process_shared(config.per_host_delay);
+        let cache = config
+            .cache_dir
+            .as_ref()
+            .and_then(|dir| DiskCache::open(dir.clone()).ok());
         Self {
             http_client,
             config,
             limiter,
+            cache,
         }
+    }
+
+    pub fn limiter(&self) -> &HostRateLimiter {
+        &self.limiter
     }
 
     pub async fn fetch(&self, raw_url: &str) -> Result<FetchOutcome, FetchError> {
@@ -128,84 +154,35 @@ impl PageFetcher {
         ensure_public_http_url(&requested)
             .map_err(|error| FetchError::SsrfBlocked(error.to_string()))?;
 
-        let mut current = canonicalize_url(&requested);
-        let mut redirects = 0u32;
-        let (status, content_type, body, final_url) = loop {
-            if cancel
-                .as_ref()
-                .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
-            {
-                return Err(FetchError::Other("cancelled".into()));
+        let canonical = canonicalize_url(&requested);
+        if let Some(cache) = &self.cache {
+            if let Ok(Some(cached)) = cache.get(canonical.as_str(), self.config.cache_ttl_page) {
+                return Ok(FetchOutcome::Fetched(page_from_cache(
+                    requested.as_str(),
+                    &cached,
+                )));
             }
+        }
 
-            let host = current
-                .host_str()
-                .ok_or_else(|| FetchError::Other("URL missing host".into()))?;
-            self.limiter.wait_turn_blocking(host);
-
-            ensure_public_http_url(&current)
-                .map_err(|error| FetchError::SsrfBlocked(error.to_string()))?;
-
-            let request = Request::builder()
-                .method(Method::GET)
-                .uri(current.as_str())
-                .header(
-                    "Accept",
-                    "text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.8",
-                )
-                .header("Accept-Language", "en-US,en;q=0.8")
-                .follow_redirects(RedirectPolicy::NoFollow)
-                .body(AsyncBody::default())
-                .map_err(|error| FetchError::Other(error.to_string()))?;
-
-            let mut response = self
-                .http_client
-                .send(request)
-                .await
-                .map_err(|error| FetchError::Other(error.to_string()))?;
-
-            let status = response.status().as_u16();
-            let content_type = response
-                .headers()
-                .get("content-type")
-                .and_then(|value| value.to_str().ok())
-                .map(|value| value.to_string());
-
-            if response.status().is_redirection() {
-                let location = response
-                    .headers()
-                    .get("location")
-                    .and_then(|value| value.to_str().ok())
-                    .ok_or_else(|| FetchError::Other("redirect missing Location".into()))?;
-                let next = current
-                    .join(location)
-                    .map_err(|error| FetchError::Other(error.to_string()))?;
-                redirects += 1;
-                if redirects > self.config.max_redirects {
-                    return Err(FetchError::Other(format!(
-                        "exceeded max redirects ({})",
-                        self.config.max_redirects
-                    )));
-                }
-                ensure_public_http_url(&next).map_err(|error| {
-                    FetchError::SsrfBlocked(format!("redirect to blocked URL: {error}"))
-                })?;
-                current = canonicalize_url(&next);
-                continue;
-            }
-
-            let mut body = Vec::new();
-            response
-                .body_mut()
-                .take(self.config.max_response_bytes + 1)
-                .read_to_end(&mut body)
-                .await
-                .context("error reading response body")?;
-            if body.len() as u64 > self.config.max_response_bytes {
-                body.truncate(self.config.max_response_bytes as usize);
-            }
-            break (status, content_type, body, current.clone());
+        let options = SafeHttpOptions {
+            method: http_client::Method::GET,
+            headers: vec![
+                ("Accept".into(), RESEARCH_ACCEPT.into()),
+                ("Accept-Language".into(), "en-US,en;q=0.8".into()),
+            ],
+            body: None,
+            max_redirects: self.config.max_redirects,
+            max_response_bytes: self.config.max_response_bytes,
+            request_timeout: self.config.request_timeout,
+            cancel: cancel.clone(),
+            limiter: Some(self.limiter.clone()),
         };
+
+        let response = safe_http_get(&self.http_client, &requested, options).await?;
+        let status = response.status;
+        let content_type = response.content_type;
+        let body = response.body;
+        let final_url = response.final_url;
 
         if !(200..300).contains(&status) {
             let preview = String::from_utf8_lossy(&body);
@@ -242,17 +219,27 @@ impl PageFetcher {
                 let hash = content_sha256(&body);
                 let source_id = format!("web:{}", &hash[..12.min(hash.len())]);
                 let retrieved_at_unix_ms = now_ms();
-                return Ok(FetchOutcome::Fetched(FetchedPage {
+                let page = FetchedPage {
                     requested_url: requested.to_string(),
                     final_url: final_url.to_string(),
                     source_id,
                     retrieved_at_unix_ms,
                     http_status: status,
-                    content_type,
+                    content_type: content_type.clone(),
                     fetch_mode: FetchMode::Http,
-                    content_sha256: hash,
-                    extracted,
-                }));
+                    content_sha256: hash.clone(),
+                    extracted: extracted.clone(),
+                };
+                if let Some(cache) = &self.cache {
+                    let _ = cache.put(&CachedPage {
+                        url: canonicalize_url(&final_url).to_string(),
+                        stored_at_unix_ms: retrieved_at_unix_ms,
+                        content_type,
+                        markdown: extracted.markdown,
+                        content_sha256: hash,
+                    });
+                }
+                return Ok(FetchOutcome::Fetched(page));
             }
         };
 
@@ -294,7 +281,8 @@ impl PageFetcher {
         })?;
 
         ensure_public_http_url(
-            &normalize_url_string(navigate_url).map_err(|error| FetchError::SsrfBlocked(error.to_string()))?,
+            &normalize_url_string(navigate_url)
+                .map_err(|error| FetchError::SsrfBlocked(error.to_string()))?,
         )
         .map_err(|error| FetchError::SsrfBlocked(error.to_string()))?;
 
@@ -302,13 +290,14 @@ impl PageFetcher {
             .ok()
             .and_then(|url| url.host_str().map(|host| host.to_string()))
             .unwrap_or_else(|| "browser".into());
-        self.limiter.wait_turn_blocking(&host);
+        self.limiter.wait_turn(&host).await;
 
         let request = BrowserFetchRequest {
             url: navigate_url.to_string(),
             profile_dir,
             download_dir,
             timeout: self.config.browser_timeout,
+            max_response_bytes: self.config.max_response_bytes,
             cancel,
         };
 
@@ -317,13 +306,6 @@ impl PageFetcher {
             // Blocking process wait; keep HTTP event loops responsive.
             smol::unblock(move || fetch_rendered_html(&request)).await
         }?;
-
-        if browser_result.html.len() as u64 > self.config.max_response_bytes {
-            return Err(FetchError::Other(format!(
-                "browser response exceeded max_response_bytes ({})",
-                self.config.max_response_bytes
-            )));
-        }
 
         let extracted = extract_page_content(
             &browser_result.final_url,
@@ -351,6 +333,37 @@ impl PageFetcher {
             content_sha256: hash,
             extracted,
         })
+    }
+}
+
+fn page_from_cache(requested_url: &str, cached: &CachedPage) -> FetchedPage {
+    let outline = heading_outline(&cached.markdown, 24);
+    let title = outline.lines().find_map(|line| {
+        let trimmed = line.trim();
+        trimmed
+            .strip_prefix('#')
+            .map(|rest| rest.trim_start_matches('#').trim().to_string())
+            .filter(|title| !title.is_empty())
+    });
+    let source_id = format!(
+        "web:{}",
+        &cached.content_sha256[..12.min(cached.content_sha256.len())]
+    );
+    FetchedPage {
+        requested_url: requested_url.to_string(),
+        final_url: cached.url.clone(),
+        source_id,
+        retrieved_at_unix_ms: cached.stored_at_unix_ms,
+        http_status: 200,
+        content_type: cached.content_type.clone(),
+        fetch_mode: FetchMode::Http,
+        content_sha256: cached.content_sha256.clone(),
+        extracted: ExtractedPage {
+            title,
+            markdown: cached.markdown.clone(),
+            outline,
+            truncated: false,
+        },
     }
 }
 
@@ -391,5 +404,12 @@ mod tests {
     fn detects_js_shell() {
         let html = br#"<!doctype html><html><body><div id="root"></div><script src="/app.js"></script></body></html>"#;
         assert!(looks_like_browser_shell(Some("text/html"), html));
+    }
+
+    #[test]
+    fn shared_limiters_across_fetchers() {
+        let a = HostRateLimiter::process_shared(std::time::Duration::from_millis(10));
+        let b = HostRateLimiter::process_shared(std::time::Duration::from_millis(20));
+        assert!(a.shares_map_with(&b));
     }
 }

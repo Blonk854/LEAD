@@ -11,6 +11,7 @@ mod discovery;
 mod envelope;
 mod extract;
 mod fetch;
+mod http;
 mod rate_limit;
 mod session;
 mod store;
@@ -29,6 +30,10 @@ pub use discovery::{
 pub use envelope::{render_search_results_for_model, render_web_envelope, sanitize_web_content};
 pub use extract::{ExtractedPage, extract_page_content, heading_outline, truncate_for_model};
 pub use fetch::{FetchError, FetchMode, FetchOutcome, FetchedPage, PageFetcher};
+pub use http::{
+    RESEARCH_ACCEPT, SafeHttpError, SafeHttpOptions, SafeHttpResponse, safe_http_get,
+    safe_http_request, validate_redirect_target,
+};
 pub use rate_limit::HostRateLimiter;
 pub use session::{
     ResearchBudgets, ResearchClaim, ResearchCitation, ResearchDigest, ResearchPageBody,
@@ -36,7 +41,7 @@ pub use session::{
 };
 pub use store::{
     SessionSummary, StoredResearchSession, list_sessions, load_session, new_session_id,
-    render_session_list, save_session, sessions_dir, web_rag_source,
+    prune_sessions, render_session_list, save_session, sessions_dir, web_rag_source,
 };
 pub use url_policy::{
     UrlPolicyError, canonicalize_url, ensure_public_http_url, is_blocked_ip, normalize_url_string,

@@ -5068,6 +5068,20 @@ impl Project {
                     });
                 }
             }
+
+            // Third pass: literal worktree-relative path without requiring the
+            // entry to exist (e.g. create_directory "notes"). Only unambiguous
+            // when a single visible worktree is present.
+            let mut visible = worktree_store.visible_worktrees(cx);
+            if let Some(worktree) = visible.next()
+                && visible.next().is_none()
+                && let Ok(rel_path) = RelPath::new(path, path_style)
+            {
+                return Some(ProjectPath {
+                    worktree_id: worktree.read(cx).id(),
+                    path: rel_path.into_arc(),
+                });
+            }
         }
 
         None

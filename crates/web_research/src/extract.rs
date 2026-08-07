@@ -25,7 +25,7 @@ pub fn extract_page_content(
     body: &[u8],
     max_chars: usize,
 ) -> Result<ExtractedPage> {
-    let content_type = classify_content_type(content_type_header);
+    let content_type = classify_content_type(content_type_header)?;
     let markdown = match content_type {
         ContentType::Html => html_to_markdown(url, body)?,
         ContentType::Plaintext => std::str::from_utf8(body)
@@ -99,17 +99,24 @@ fn first_heading(markdown: &str) -> Option<String> {
     })
 }
 
-fn classify_content_type(header: Option<&str>) -> ContentType {
+fn classify_content_type(header: Option<&str>) -> Result<ContentType> {
     let Some(header) = header else {
-        return ContentType::Html;
+        // Missing/empty treated as HTML for docs sites that omit Content-Type.
+        return Ok(ContentType::Html);
     };
     let lower = header.to_ascii_lowercase();
-    if lower.starts_with("text/plain") {
-        ContentType::Plaintext
-    } else if lower.starts_with("application/json") {
-        ContentType::Json
+    let mime = lower.split(';').next().unwrap_or(&lower).trim();
+    if mime.is_empty() {
+        return Ok(ContentType::Html);
+    }
+    if mime == "text/plain" {
+        Ok(ContentType::Plaintext)
+    } else if mime == "application/json" {
+        Ok(ContentType::Json)
+    } else if mime == "text/html" || mime == "application/xhtml+xml" {
+        Ok(ContentType::Html)
     } else {
-        ContentType::Html
+        bail!("unsupported_content_type: {mime} (allowed: text/html, application/xhtml+xml, text/plain, application/json)")
     }
 }
 
@@ -160,5 +167,29 @@ mod tests {
         .unwrap();
         assert_eq!(page.markdown, "hello world");
         assert!(!page.truncated);
+    }
+
+    #[test]
+    fn rejects_disallowed_content_type() {
+        let err = extract_page_content(
+            "https://example.com",
+            Some("image/png"),
+            b"\x89PNG",
+            12_000,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unsupported_content_type"));
+    }
+
+    #[test]
+    fn missing_content_type_treated_as_html() {
+        let page = extract_page_content(
+            "https://example.com",
+            None,
+            b"<html><body><h1>Hi</h1><p>Hello</p></body></html>",
+            12_000,
+        )
+        .unwrap();
+        assert!(!page.markdown.trim().is_empty());
     }
 }

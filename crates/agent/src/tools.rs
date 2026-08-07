@@ -1,5 +1,6 @@
 mod apply_code_action_tool;
 mod browse_page_tool;
+mod complete_goal_tool;
 mod computer_use_tool;
 mod context_server_registry;
 mod copy_path_tool;
@@ -69,8 +70,113 @@ where
     }
 }
 
+/// Deserialize an optional unsigned integer that local models often emit as a
+/// JSON string (`"30000"`) instead of a number (`30000`).
+pub(crate) fn deserialize_optional_stringly_u64<'de, D>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_optional_stringly_unsigned(deserializer)
+}
+
+/// Deserialize an optional `usize` that may arrive as a stringly JSON number.
+pub(crate) fn deserialize_optional_stringly_usize<'de, D>(
+    deserializer: D,
+) -> Result<Option<usize>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_optional_stringly_unsigned(deserializer)
+}
+
+fn deserialize_optional_stringly_unsigned<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: DeserializeOwned + std::str::FromStr,
+    T::Err: std::fmt::Display,
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(number)) => {
+            serde_json::from_value(serde_json::Value::Number(number))
+                .map(Some)
+                .map_err(D::Error::custom)
+        }
+        Some(serde_json::Value::String(string)) => {
+            let trimmed = string.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                trimmed
+                    .parse::<T>()
+                    .map(Some)
+                    .map_err(|error| D::Error::custom(format!("invalid number `{string}`: {error}")))
+            }
+        }
+        Some(other) => Err(D::Error::custom(format!(
+            "expected unsigned number or numeric string, got {other}"
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod stringly_number_tests {
+    use super::*;
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct Sample {
+        #[serde(default, deserialize_with = "deserialize_optional_stringly_u64")]
+        timeout_ms: Option<u64>,
+        #[serde(default, deserialize_with = "deserialize_optional_stringly_usize")]
+        max_pages: Option<usize>,
+    }
+
+    #[test]
+    fn accepts_numeric_and_stringly_unsigned_fields() {
+        let from_numbers: Sample = serde_json::from_value(serde_json::json!({
+            "timeout_ms": 30000,
+            "max_pages": 6
+        }))
+        .unwrap();
+        assert_eq!(
+            from_numbers,
+            Sample {
+                timeout_ms: Some(30000),
+                max_pages: Some(6),
+            }
+        );
+
+        let from_strings: Sample = serde_json::from_value(serde_json::json!({
+            "timeout_ms": "5000",
+            "max_pages": "3"
+        }))
+        .unwrap();
+        assert_eq!(
+            from_strings,
+            Sample {
+                timeout_ms: Some(5000),
+                max_pages: Some(3),
+            }
+        );
+
+        let missing: Sample = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(
+            missing,
+            Sample {
+                timeout_ms: None,
+                max_pages: None,
+            }
+        );
+    }
+}
+
 pub use apply_code_action_tool::*;
 pub use browse_page_tool::*;
+pub use complete_goal_tool::*;
 pub use computer_use_tool::*;
 pub use context_server_registry::*;
 pub use copy_path_tool::*;
@@ -191,6 +297,7 @@ tools! {
     AppendToJournalTool,
     ApplyCodeActionTool,
     BrowsePageTool,
+    CompleteGoalTool,
     ComputerUseTool,
     CopyPathTool,
     CreateDirectoryTool,

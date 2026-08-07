@@ -27,9 +27,28 @@ const CRASH_HANDLER_PING_TIMEOUT: Duration = Duration::from_secs(60);
 const CRASH_HANDLER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Force a backtrace to be printed on panic.
+///
+/// Used for Dev builds (where the minidump crash handler is not installed by
+/// default). Always emit the panic into the application log as well as stderr,
+/// because GUI launches on Windows have no console — without this, panics only
+/// show up as a silent `0xc0000409` / `abort_internal` WER report.
 pub fn force_backtrace() {
     let old_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
+        let message = strip_user_string_from_panic(
+            info.payload_as_str().unwrap_or("Box<Any>"),
+        );
+        let location = info
+            .location()
+            .map_or_else(|| "<unknown>".to_owned(), |location| location.to_string());
+        let current_thread = std::thread::current();
+        let thread_name = current_thread.name().unwrap_or("<unnamed>");
+
+        // Prefer the log file so GUI sessions leave a diagnosable trail.
+        log::error!("thread '{thread_name}' panicked at {location}:\n{message}");
+        // Best-effort flush so the line survives the imminent abort.
+        log::logger().flush();
+
         unsafe { env::set_var("RUST_BACKTRACE", "1") };
         old_hook(info);
         // prevent the macOS crash dialog from popping up

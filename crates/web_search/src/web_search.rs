@@ -33,8 +33,19 @@ impl WebSearchRegistry {
         cx.global::<GlobalWebSearchRegistry>().0.clone()
     }
 
+    pub fn try_global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalWebSearchRegistry>()
+            .map(|global| global.0.clone())
+    }
+
     pub fn read_global(cx: &App) -> &Self {
         cx.global::<GlobalWebSearchRegistry>().0.read(cx)
+    }
+
+    /// Soft read for agent tools — returns `None` if web search was never initialized.
+    pub fn try_read_global(cx: &App) -> Option<&Self> {
+        cx.try_global::<GlobalWebSearchRegistry>()
+            .map(|global| global.0.read(cx))
     }
 
     pub fn providers(&self) -> impl Iterator<Item = &Arc<dyn WebSearchProvider>> {

@@ -1,0 +1,13 @@
+Extract durable project memory from the recent agent turn only.
+
+Emit 0–8 lines in this exact form (no prose, no markdown fences):
+TAG | claim | evidence?
+
+Allowed tags: GOAL, DEC, PATH, API, FAIL, FIX, NEXT, URL, PREF, BLOCK.
+
+Rules:
+- Only facts that should survive compaction or a new thread.
+- Prefer concrete paths, decisions, failures, and next steps.
+- Do not invent. Do not restate tool dumps, SERP results, or full file contents.
+- Do not rephrase or duplicate facts listed under "Already journaled".
+- If nothing new and durable happened, reply with exactly: NONE

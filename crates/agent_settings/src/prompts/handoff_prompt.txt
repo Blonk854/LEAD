@@ -9,4 +9,8 @@ Write a thorough, well-structured hand-off that includes:
 - Key references: constraints, preferences, commands, IDs, URLs, and data needed to continue
 - Pitfalls: anything tried that did not work, so it is not repeated
 
+Web research retention rules:
+- Retain verified URLs, versions, package/crate names, `research_web` session ids, domain allowlists, and decisions grounded in fetched sources.
+- Drop raw `<web_content>` envelopes, full page markdown bodies, and SERP result dumps. Prefer numbered citations and short quotes over pasted page text.
+
 Be specific and cite exact file paths, function names, and commands wherever possible. Do not ask the user questions. Write only the hand-off, with no preamble.

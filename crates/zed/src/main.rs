@@ -703,10 +703,13 @@ fn main() {
         acp_tools::init(cx);
         zed::telemetry_log::init(cx);
         zed::remote_debug::init(cx);
+        // Native / local HTML web search must work in LOCAL_ONLY builds — agent
+        // tools (`search_web`, `research_web`) read this global and would panic
+        // with "no state of type web_search::GlobalWebSearchRegistry exists".
+        web_search::init(cx);
+        web_search_providers::init(app_state.client.clone(), app_state.user_store.clone(), cx);
         if !paths::LOCAL_ONLY {
             edit_prediction_ui::init(cx);
-            web_search::init(cx);
-            web_search_providers::init(app_state.client.clone(), app_state.user_store.clone(), cx);
             edit_prediction_registry::init(
                 app_state.client.clone(),
                 app_state.user_store.clone(),

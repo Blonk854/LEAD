@@ -24,6 +24,8 @@ use web_search::WebSearchRegistry;
 use crate::project_memory::primary_worktree_root;
 use crate::{AgentTool, ToolCallEventStream, ToolInput, ToolPermissionContext, full_access_enabled};
 use super::browse_page_tool::web_research_config_from_settings;
+use super::deserialize_optional_stringly_u64;
+use super::deserialize_optional_stringly_usize;
 use super::rag_tool::{RAG_INDEX_CACHE, embedding_settings_for_rag};
 
 /// Run a bounded multi-page web research session and return a structured digest.
@@ -33,13 +35,17 @@ pub struct ResearchWebToolInput {
     #[serde(default)]
     pub query: String,
     /// Optional host allowlist (e.g. `docs.rs`, `example.com`). Defaults to hosts from search hits.
+    /// Same-host/subdomain follows stay inside this list without re-confirm; cross-domain expansion is not automatic.
     #[serde(default)]
     pub domains: Vec<String>,
     /// Maximum pages to fetch (default from settings, typically 6).
+    #[serde(default, deserialize_with = "deserialize_optional_stringly_usize")]
     pub max_pages: Option<usize>,
     /// Maximum link-follow depth from each SERP seed (default 1).
+    #[serde(default, deserialize_with = "deserialize_optional_stringly_usize")]
     pub max_depth: Option<usize>,
     /// Wall-clock budget in seconds (default from settings, typically 90).
+    #[serde(default, deserialize_with = "deserialize_optional_stringly_u64")]
     pub time_budget_secs: Option<u64>,
     /// Resume a previously persisted session id (returns stored digest; no network).
     pub session_id: Option<String>,
@@ -163,6 +169,28 @@ impl AgentTool for ResearchWebTool {
 
                 let mut note = String::new();
                 if input.ingest_to_rag {
+                    let mut auth_values = research_auth_values(
+                        &stored.digest.query,
+                        &stored.digest.domain_allowlist,
+                        true,
+                    );
+                    auth_values.push(format!("session_id={}", stored.id));
+                    let authorize = cx.update(|cx| {
+                        event_stream.authorize(
+                            format!(
+                                "Ingest research session {} into RAG ({} page(s))",
+                                MarkdownInlineCode(&stored.id),
+                                stored.pages.len()
+                            ),
+                            ToolPermissionContext::new(Self::NAME, auth_values),
+                            cx,
+                        )
+                    });
+                    authorize
+                        .await
+                        .map_err(|error| ResearchWebToolOutput::Error {
+                            error: error.to_string(),
+                        })?;
                     note = ingest_pages_to_rag(&project, &stored.pages, cx).await?;
                 }
 
@@ -175,7 +203,6 @@ impl AgentTool for ResearchWebTool {
                 emit_digest_update(&stored.digest, &event_stream);
                 let mut digest = stored.digest;
                 if !note.is_empty() {
-                    // Surface ingest result via skipped note channel? Append in render via session.
                     digest.stopped_reason =
                         format!("{} | {note}", digest.stopped_reason);
                 }
@@ -210,53 +237,20 @@ impl AgentTool for ResearchWebTool {
                 .clamp(15, 300);
             let persist = input.persist.unwrap_or(true);
 
-            let mut auth_values = vec![input.query.clone()];
-            auth_values.extend(input.domains.iter().cloned());
-            auth_values.push(format!("max_pages={max_pages}"));
-            auth_values.push(format!("max_depth={max_depth}"));
-            auth_values.push(format!("time_budget_secs={time_budget_secs}"));
-            if settings.web_research.browser_fallback_enabled {
-                auth_values.push("browser_fallback=1".into());
-            }
-            if input.ingest_to_rag {
-                auth_values.push("ingest_to_rag=1".into());
-            }
-
-            let authorize = cx.update(|cx| {
-                let browser_note = if settings.web_research.browser_fallback_enabled {
-                    "; may use isolated browser"
-                } else {
-                    ""
-                };
-                let ingest_note = if input.ingest_to_rag {
-                    "; will ingest to RAG"
-                } else {
-                    ""
-                };
-                event_stream.authorize(
-                    format!(
-                        "Research web for {} (≤{max_pages} pages, depth {max_depth}, {time_budget_secs}s{browser_note}{ingest_note})",
-                        MarkdownInlineCode(&input.query)
-                    ),
-                    ToolPermissionContext::new(Self::NAME, auth_values),
-                    cx,
-                )
-            });
-            authorize
-                .await
-                .map_err(|error| ResearchWebToolOutput::Error {
-                    error: error.to_string(),
-                })?;
-
             event_stream.update_fields(
                 acp::ToolCallUpdateFields::new().title(format!(
-                    "Researching: {}…",
+                    "Discovering: {}…",
                     truncate_for_title(&input.query, 48)
                 )),
             );
 
             let search_task = cx.update(|cx| {
-                let Some(provider) = WebSearchRegistry::read_global(cx).active_provider() else {
+                let Some(registry) = WebSearchRegistry::try_read_global(cx) else {
+                    return Err(ResearchWebToolOutput::Error {
+                        error: "Web search is not initialized.".into(),
+                    });
+                };
+                let Some(provider) = registry.active_provider() else {
                     return Err(ResearchWebToolOutput::Error {
                         error: "Web search is not available.".into(),
                     });
@@ -308,6 +302,42 @@ impl AgentTool for ResearchWebTool {
                     error: "No usable domain allowlist (SERP hosts empty or all blocked).".into(),
                 });
             }
+
+            // Authorize after SERP so the prompt shows concrete domains.
+            // Budgets/flags live in the title only so Always-allow domain patterns work.
+            let auth_values =
+                research_auth_values(&input.query, &domains, input.ingest_to_rag);
+            let authorize = cx.update(|cx| {
+                let browser_note = if settings.web_research.browser_fallback_enabled {
+                    "; may use isolated browser"
+                } else {
+                    ""
+                };
+                let ingest_note = if input.ingest_to_rag {
+                    "; will ingest to RAG"
+                } else {
+                    ""
+                };
+                let domain_preview = domains
+                    .iter()
+                    .take(6)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                event_stream.authorize(
+                    format!(
+                        "Research web for {} on [{domain_preview}] (≤{max_pages} pages, depth {max_depth}, {time_budget_secs}s{browser_note}{ingest_note})",
+                        MarkdownInlineCode(&input.query)
+                    ),
+                    ToolPermissionContext::new(Self::NAME, auth_values),
+                    cx,
+                )
+            });
+            authorize
+                .await
+                .map_err(|error| ResearchWebToolOutput::Error {
+                    error: format!("research_denied_after_discovery: {error}"),
+                })?;
 
             event_stream.update_fields(
                 acp::ToolCallUpdateFields::new()
@@ -524,6 +554,21 @@ fn truncate_for_title(text: &str, max_chars: usize) -> String {
     out
 }
 
+/// Auth values for Always-allow matching: query + concrete domains (+ ingest flag).
+/// Budgets stay in the authorize title only.
+pub(crate) fn research_auth_values(
+    query: &str,
+    domains: &[String],
+    ingest_to_rag: bool,
+) -> Vec<String> {
+    let mut values = vec![query.to_string()];
+    values.extend(domains.iter().cloned());
+    if ingest_to_rag {
+        values.push("ingest_to_rag=1".into());
+    }
+    values
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -533,11 +578,34 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::research_auth_values;
+
     #[test]
     fn research_web_is_registered() {
         assert!(
             crate::ALL_TOOL_NAMES.contains(&"research_web"),
             "research_web must be registered in tools!"
         );
+    }
+
+    #[test]
+    fn auth_values_are_query_domains_and_optional_ingest() {
+        let values = research_auth_values(
+            "gpui docs",
+            &["docs.rs".into(), "zed.dev".into()],
+            true,
+        );
+        assert_eq!(
+            values,
+            vec![
+                "gpui docs".to_string(),
+                "docs.rs".into(),
+                "zed.dev".into(),
+                "ingest_to_rag=1".into(),
+            ]
+        );
+        let without_ingest = research_auth_values("q", &["a.com".into()], false);
+        assert!(!without_ingest.iter().any(|v| v.starts_with("max_pages=")));
+        assert!(!without_ingest.iter().any(|v| v.contains("ingest_to_rag")));
     }
 }

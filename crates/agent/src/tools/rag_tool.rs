@@ -114,7 +114,7 @@ impl AgentTool for RagIngestTool {
     fn run(
         self: Arc<Self>,
         input: ToolInput<Self::Input>,
-        _event_stream: ToolCallEventStream,
+        event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
         let http_client = self.project.read(cx).client().http_client();
@@ -123,8 +123,26 @@ impl AgentTool for RagIngestTool {
                 error: error.to_string(),
             })?;
 
-            if let Some(session_id) = input.research_session_id.as_deref() {
-                return ingest_research_session(&self.project, session_id, cx).await;
+            if let Some(session_id) = input.research_session_id.clone() {
+                let authorize = cx.update(|cx| {
+                    event_stream.authorize(
+                        format!("Index research session {session_id} into RAG"),
+                        crate::ToolPermissionContext::new(
+                            Self::NAME,
+                            vec![
+                                format!("research_session_id={session_id}"),
+                                "ingest_to_rag=1".into(),
+                            ],
+                        ),
+                        cx,
+                    )
+                });
+                authorize
+                    .await
+                    .map_err(|error| RagIngestToolOutput::Error {
+                        error: error.to_string(),
+                    })?;
+                return ingest_research_session(&self.project, &session_id, cx).await;
             }
 
             let path = input.path.ok_or_else(|| RagIngestToolOutput::Error {

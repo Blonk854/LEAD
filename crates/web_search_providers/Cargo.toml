@@ -26,3 +26,4 @@ serde_json.workspace = true
 url.workspace = true
 web_research.workspace = true
 web_search.workspace = true
+settings.workspace = true

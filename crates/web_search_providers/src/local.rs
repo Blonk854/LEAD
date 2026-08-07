@@ -1,14 +1,14 @@
 use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Result, bail};
 use cloud_llm_client::{WebSearchResponse, WebSearchResult};
-use futures::AsyncReadExt as _;
 use gpui::{App, AppContext as _, Task};
-use http_client::{
-    AsyncBody, HttpClient, HttpClientWithUrl, HttpRequestExt as _, Method, RedirectPolicy, Request,
+use http_client::HttpClientWithUrl;
+use web_research::{
+    DiscoveryAdapter, DiscoveryHealth, DiscoveryOutcome, HostRateLimiter, RESEARCH_ACCEPT,
+    SafeHttpOptions, canonicalize_url, safe_http_get,
 };
-use url::Url;
-use web_research::{DiscoveryAdapter, DiscoveryHealth, DiscoveryOutcome};
 use web_search::{WebSearchProvider, WebSearchProviderId};
 
 use crate::local_html::{BingHtmlAdapter, DuckDuckGoHtmlAdapter, StartpageHtmlAdapter};
@@ -19,6 +19,10 @@ pub struct LocalHtmlWebSearchProvider {
     http_client: Arc<HttpClientWithUrl>,
     max_results: usize,
     max_snippet_chars: usize,
+    max_redirects: u32,
+    max_response_bytes: u64,
+    request_timeout: Duration,
+    per_host_delay: Duration,
 }
 
 impl LocalHtmlWebSearchProvider {
@@ -27,12 +31,30 @@ impl LocalHtmlWebSearchProvider {
             http_client,
             max_results: 5,
             max_snippet_chars: 300,
+            max_redirects: 5,
+            max_response_bytes: 1024 * 1024,
+            request_timeout: Duration::from_millis(15_000),
+            per_host_delay: Duration::from_millis(1_000),
         }
     }
 
     pub fn with_limits(mut self, max_results: usize, max_snippet_chars: usize) -> Self {
         self.max_results = max_results;
         self.max_snippet_chars = max_snippet_chars;
+        self
+    }
+
+    pub fn with_http_policy(
+        mut self,
+        max_redirects: u32,
+        max_response_bytes: u64,
+        request_timeout: Duration,
+        per_host_delay: Duration,
+    ) -> Self {
+        self.max_redirects = max_redirects;
+        self.max_response_bytes = max_response_bytes;
+        self.request_timeout = request_timeout;
+        self.per_host_delay = per_host_delay;
         self
     }
 }
@@ -46,8 +68,22 @@ impl WebSearchProvider for LocalHtmlWebSearchProvider {
         let http_client = self.http_client.clone();
         let max_results = self.max_results;
         let max_snippet_chars = self.max_snippet_chars;
+        let max_redirects = self.max_redirects;
+        let max_response_bytes = self.max_response_bytes;
+        let request_timeout = self.request_timeout;
+        let per_host_delay = self.per_host_delay;
         cx.background_spawn(async move {
-            search_html_engines(http_client, query, max_results, max_snippet_chars).await
+            search_html_engines(
+                http_client,
+                query,
+                max_results,
+                max_snippet_chars,
+                max_redirects,
+                max_response_bytes,
+                request_timeout,
+                per_host_delay,
+            )
+            .await
         })
     }
 }
@@ -57,6 +93,10 @@ async fn search_html_engines(
     query: String,
     max_results: usize,
     max_snippet_chars: usize,
+    max_redirects: u32,
+    max_response_bytes: u64,
+    request_timeout: Duration,
+    per_host_delay: Duration,
 ) -> Result<WebSearchResponse> {
     let adapters: Vec<(String, Box<dyn DiscoveryAdapter>)> = vec![
         (
@@ -82,9 +122,19 @@ async fn search_html_engines(
         ),
     ];
 
+    let limiter = HostRateLimiter::process_shared(per_host_delay);
     let mut last_detail = String::from("all discovery adapters failed");
     for (serp_url, adapter) in adapters {
-        match fetch_serp_html(http_client.clone(), &serp_url).await {
+        match fetch_serp_html(
+            http_client.clone(),
+            &serp_url,
+            max_redirects,
+            max_response_bytes,
+            request_timeout,
+            limiter.clone(),
+        )
+        .await
+        {
             Ok(html) => {
                 let outcome = adapter.search(&query, &html);
                 last_detail = format!(
@@ -110,41 +160,36 @@ async fn search_html_engines(
     bail!("discovery_failed: {last_detail}")
 }
 
-async fn fetch_serp_html(http_client: Arc<HttpClientWithUrl>, url: &str) -> Result<String> {
-    let parsed = Url::parse(url).context("invalid SERP URL")?;
-    web_research::ensure_public_http_url(&parsed)
-        .map_err(|error| anyhow::anyhow!("ssrf_blocked: {error}"))?;
-
-    let request = Request::builder()
-        .method(Method::GET)
-        .uri(url)
-        .header(
-            "Accept",
-            "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
-        )
-        .header("Accept-Language", "en-US,en;q=0.8")
-        .follow_redirects(RedirectPolicy::FollowLimit(5))
-        .body(AsyncBody::default())
-        .context("build SERP request")?;
-
-    let mut response = http_client
-        .send(request)
+async fn fetch_serp_html(
+    http_client: Arc<HttpClientWithUrl>,
+    url: &str,
+    max_redirects: u32,
+    max_response_bytes: u64,
+    request_timeout: Duration,
+    limiter: HostRateLimiter,
+) -> Result<String> {
+    let parsed = url::Url::parse(url)?;
+    let options = SafeHttpOptions {
+        method: http_client::Method::GET,
+        headers: vec![
+            ("Accept".into(), RESEARCH_ACCEPT.into()),
+            ("Accept-Language".into(), "en-US,en;q=0.8".into()),
+        ],
+        body: None,
+        max_redirects,
+        max_response_bytes,
+        request_timeout,
+        cancel: None,
+        limiter: Some(limiter),
+    };
+    let response = safe_http_get(&http_client, &parsed, options)
         .await
-        .with_context(|| format!("SERP request failed for {url}"))?;
-    let status = response.status();
-    let mut body = Vec::new();
-    response
-        .body_mut()
-        .take(1024 * 1024 + 1)
-        .read_to_end(&mut body)
-        .await
-        .context("read SERP body")?;
-    if !status.is_success() {
-        bail!("SERP HTTP {}", status.as_u16());
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    if !(200..300).contains(&response.status) {
+        bail!("SERP HTTP {}", response.status);
     }
-    // Re-check final URL host if the client followed redirects to a private IP literal in Location.
-    // Full DNS revalidation of redirect chains for SERP is best-effort here; page fetch does hop checks.
-    Ok(String::from_utf8_lossy(&body).into_owned())
+    let _ = canonicalize_url(&response.final_url);
+    Ok(String::from_utf8_lossy(&response.body).into_owned())
 }
 
 fn to_web_search_response(

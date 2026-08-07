@@ -4,7 +4,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -53,7 +53,46 @@ pub fn save_session(data_dir: &Path, session: &StoredResearchSession) -> Result<
     let path = dir.join(format!("{}.json", session.id));
     let bytes = serde_json::to_vec_pretty(session).context("serialize research session")?;
     fs::write(&path, bytes).with_context(|| format!("write {}", path.display()))?;
+    let _ = prune_sessions(data_dir, 50, Duration::from_secs(14 * 24 * 60 * 60));
     Ok(path)
+}
+
+/// Delete oldest / expired session files. Keeps at most `max_sessions` and drops
+/// entries older than `max_age` based on `updated_at_unix_ms`.
+pub fn prune_sessions(data_dir: &Path, max_sessions: usize, max_age: Duration) -> Result<usize> {
+    let dir = sessions_dir(data_dir);
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let now = now_ms();
+    let max_age_ms = max_age.as_millis() as u64;
+    let mut entries: Vec<(PathBuf, u64)> = Vec::new();
+    for entry in fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
+        let Ok(session) = serde_json::from_slice::<StoredResearchSession>(&bytes) else {
+            continue;
+        };
+        if now.saturating_sub(session.updated_at_unix_ms) > max_age_ms {
+            let _ = fs::remove_file(&path);
+            continue;
+        }
+        entries.push((path, session.updated_at_unix_ms));
+    }
+    entries.sort_by(|left, right| right.1.cmp(&left.1));
+    let mut removed = 0usize;
+    for (path, _) in entries.into_iter().skip(max_sessions.max(1)) {
+        if fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 pub fn load_session(data_dir: &Path, session_id: &str) -> Result<StoredResearchSession> {
@@ -210,5 +249,25 @@ mod tests {
             web_rag_source("https://example.com/a", "web:hash"),
             "web:https://example.com/a"
         );
+    }
+
+    #[test]
+    fn prune_sessions_caps_count() {
+        let root = tempfile::tempdir().unwrap();
+        let now = now_ms();
+        for i in 0..5 {
+            let mut session = sample_session(&format!("id-{i}"));
+            session.updated_at_unix_ms = now + i as u64;
+            session.created_at_unix_ms = now + i as u64;
+            // Write without going through save_session's auto-prune side effect on timestamps.
+            let dir = sessions_dir(root.path());
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join(format!("{}.json", session.id));
+            std::fs::write(&path, serde_json::to_vec_pretty(&session).unwrap()).unwrap();
+        }
+        let removed = prune_sessions(root.path(), 2, Duration::from_secs(14 * 24 * 60 * 60)).unwrap();
+        assert_eq!(removed, 3);
+        let listed = list_sessions(root.path(), 20).unwrap();
+        assert_eq!(listed.len(), 2);
     }
 }

@@ -204,14 +204,21 @@ impl ApplicationMenu {
                     )
                     .with_handle(current_handle.clone()),
             )
+            // Click opens menus. Hover only switches between menus once one is
+            // already open (standard desktop menu-bar behavior).
             .on_hover(move |hover_enter, window, cx| {
-                if *hover_enter && !current_handle.is_deployed() {
-                    all_handles.iter().for_each(|h| h.hide(cx));
-
-                    // We need to defer this so that this menu handle can take focus from the previous menu
-                    let handle = current_handle.clone();
-                    window.defer(cx, move |window, cx| handle.show(window, cx));
+                if !*hover_enter || current_handle.is_deployed() {
+                    return;
                 }
+                let another_menu_open = all_handles.iter().any(|h| h.is_deployed());
+                if !another_menu_open {
+                    return;
+                }
+                all_handles.iter().for_each(|h| h.hide(cx));
+
+                // Defer so this menu handle can take focus from the previous menu.
+                let handle = current_handle.clone();
+                window.defer(cx, move |window, cx| handle.show(window, cx));
             })
     }
 

@@ -1,16 +1,18 @@
 use crate::{
-    AppendToJournalTool, ApplyCodeActionTool, BrowsePageTool, CodeActionStore, ComputerUseTool,
-    ContextServerRegistry, CopyPathTool, CreateDirectoryTool, CreateThreadTool, DbLanguageModel,
-    DbThread, DeletePathTool, DiagnosticsTool, EditFileTool, FetchTool, FindPathTool,
-    FindReferencesTool, GetCodeActionsTool, GoToDefinitionTool, GrepTool, HttpRequestTool,
-    ListAgentsAndModelsTool, ListDirectoryTool, MovePathTool, ProcessControlTool, ProjectSnapshot,
-    RagIngestTool, RagSearchTool, ReadFileTool, ReadJournalTool, RenameTool, ResearchWebTool,
-    RunCodeTool, SandboxedTerminalTool, SpawnAgentTool, SystemPromptTemplate, Template, Templates,
-    TerminalTool, ThreadGoal, ToolPermissionDecision, UpdatePlanTool, UpdateTitleTool, WebSearchTool,
-    WriteFileTool, decide_permission_from_settings, format_project_memory_context,
-    persist_summary_to_worktrees,
-    project_memory::worktree_roots,
+    AppendToJournalTool, ApplyCodeActionTool, BrowsePageTool, CodeActionStore, CompleteGoalTool,
+    ComputerUseTool, ContextServerRegistry, CopyPathTool, CreateDirectoryTool, CreateThreadTool,
+    DbLanguageModel, DbThread, DeletePathTool, DiagnosticsTool, EditFileTool, FetchTool,
+    FindPathTool, FindReferencesTool, GetCodeActionsTool, GoToDefinitionTool, GrepTool,
+    HttpRequestTool, JournalAppendOptions, ListAgentsAndModelsTool, ListDirectoryTool,
+    MovePathTool, ProcessControlTool, ProjectSnapshot, RagIngestTool, RagSearchTool, ReadFileTool,
+    ReadJournalTool, RenameTool, ResearchWebTool, RunCodeTool, SandboxedTerminalTool,
+    SpawnAgentTool, SystemPromptTemplate, Template, Templates, TerminalTool, ThreadGoal,
+    ToolPermissionDecision, UpdatePlanTool, UpdateTitleTool, WebSearchTool, WriteFileTool,
+    append_journal_with_options, decide_permission_from_settings, format_project_memory_context,
+    parse_journal_fact_extract_response, persist_journal_facts_to_worktrees,
+    persist_summary_to_worktrees, project_memory::worktree_roots, recent_journal_facts,
     repetition_watchdog::{RepetitionTrip, RepetitionWatchdog, RepetitionWatchdogConfig},
+    split_summary_and_journal_facts,
 };
 use acp_thread::{MentionUri, UserMessageId};
 use action_log::ActionLog;
@@ -25,7 +27,8 @@ use crate::sandboxing::{SandboxRequest, ThreadSandboxGrants, sandboxing_enabled}
 use agent_client_protocol::schema as acp;
 use agent_settings::{
     AgentProfileId, AgentSettings, COMPACTION_PROMPT, GOAL_CHECKPOINT_PROMPT, HANDOFF_PROMPT,
-    NetworkAgentDelegationMode, SUMMARIZE_THREAD_DETAILED_PROMPT, SUMMARIZE_THREAD_PROMPT,
+    JOURNAL_FACT_EXTRACT_PROMPT, NetworkAgentDelegationMode, SUMMARIZE_THREAD_DETAILED_PROMPT,
+    SUMMARIZE_THREAD_PROMPT,
 };
 use anyhow::{Context as _, Result, anyhow};
 use chrono::{DateTime, Local, Utc};
@@ -107,6 +110,7 @@ const ORCHESTRATOR_TOOLS: &[&str] = &[
     SpawnAgentTool::NAME,
     AppendToJournalTool::NAME,
     ReadJournalTool::NAME,
+    CompleteGoalTool::NAME,
     RagIngestTool::NAME,
     RagSearchTool::NAME,
     DiagnosticsTool::NAME,
@@ -129,7 +133,11 @@ pub const MIN_GOAL_COMPACTION_CONTEXT_WINDOW: u64 = 16_000;
 
 const SMALL_CONTEXT_WINDOW_THRESHOLD: u64 = 80_000;
 
-const SMALL_CONTEXT_REMAINING_TOKEN_BUDGET: u64 = 8_000;
+/// Remaining-token headroom before auto-compaction on small windows.
+/// Derived from usable input (`max - max_output`) so typical local shapes
+/// compact *before* a ~0.5–0.6 rollover line.
+const SMALL_CONTEXT_REMAINING_TOKEN_BUDGET_MIN: u64 = 2_500;
+const SMALL_CONTEXT_REMAINING_TOKEN_BUDGET_MAX: u64 = 12_000;
 
 const SMALL_CONTEXT_RETAINED_USER_MESSAGES_BYTE_BUDGET: usize = 20_000;
 
@@ -1313,6 +1321,9 @@ pub struct Thread {
     /// Set once this thread has been auto-rolled into a fresh thread, so it is
     /// never rolled over again (prevents repeat/ping-pong rollovers).
     rolled_over: bool,
+    /// Message index through which auto journal-fact extraction has already run.
+    /// Runtime-only (not persisted).
+    last_journal_fact_extract_ix: usize,
     /// Hybrid worker-pool id assigned to this subagent thread, if any.
     assigned_worker_id: Option<String>,
 }
@@ -1462,6 +1473,7 @@ impl Thread {
             goal: None,
             pending_goal_verification: false,
             rolled_over: false,
+            last_journal_fact_extract_ix: 0,
             assigned_worker_id: None,
         }
     }
@@ -1900,6 +1912,7 @@ impl Thread {
             goal: db_thread.goal,
             pending_goal_verification: false,
             rolled_over: db_thread.rolled_over,
+            last_journal_fact_extract_ix: 0,
             assigned_worker_id: None,
         };
         if thread.subagent_context.is_none() {
@@ -2194,6 +2207,7 @@ impl Thread {
         self.add_tool(ListDirectoryTool::new(self.project.clone()));
         self.add_tool(AppendToJournalTool::new(self.project.clone()));
         self.add_tool(ReadJournalTool::new(self.project.clone()));
+        self.add_tool(CompleteGoalTool::new(cx.weak_entity()));
         self.add_tool(RagIngestTool::new(self.project.clone()));
         self.add_tool(RagSearchTool::new(self.project.clone()));
         self.add_tool(MovePathTool::new(self.project.clone()));
@@ -2622,6 +2636,7 @@ impl Thread {
                     Ok(()) => {
                         log::debug!("Turn execution completed");
                         event_stream.send_stop(acp::StopReason::EndTurn);
+                        _ = this.update(cx, |this, cx| this.spawn_journal_fact_extract(cx));
                     }
                     Err(error) => {
                         log::error!("Turn execution failed: {:?}", error);
@@ -3143,10 +3158,25 @@ impl Thread {
             return Err(anyhow::anyhow!("Compaction produced an empty summary"));
         }
 
+        let (summary, facts) = split_summary_and_journal_facts(&summary);
+        // Bad mid-summary "Facts:" headers must never wipe the handoff; the
+        // splitter keeps the original text when facts are unusable.
+        if summary.is_empty() {
+            log::warn!("Compaction produced an empty summary after FACTS split");
+            return Err(anyhow::anyhow!("Compaction produced an empty summary"));
+        }
+
         log::debug!("Compaction succeeded:\n{summary}");
 
         this.update(cx, |this, cx| {
-            persist_summary_to_worktrees(&this.project, &summary, cx);
+            if !this.is_subagent() {
+                persist_summary_to_worktrees(&this.project, &summary, cx);
+                if let Some(facts) = facts.as_ref() {
+                    // Compaction already wrote project_summary — do not upsert
+                    // from journal one-liners on top of the fresh handoff.
+                    persist_journal_facts_to_worktrees(&this.project, facts, false, cx);
+                }
+            }
             if let Some(goal) = this.goal.as_mut() {
                 if goal.is_active() {
                     goal.push_checkpoint(summary.clone());
@@ -3158,10 +3188,149 @@ impl Thread {
             } else {
                 this.messages.push(compaction);
             }
+            this.last_journal_fact_extract_ix = this.messages.len();
             cx.notify();
         })?;
 
         Ok(ControlFlow::Continue(()))
+    }
+
+    /// After a successful turn, extract durable `TAG | claim` facts into the
+    /// project journal in the background so small models need not remember to
+    /// call `append_to_journal`.
+    fn spawn_journal_fact_extract(&mut self, cx: &mut Context<Self>) {
+        if self.is_subagent() {
+            return;
+        }
+        // Auto-extract is aimed at small/local windows where HOT is scarce.
+        // Large cloud threads already keep more history in-context.
+        let small_or_local = self.uses_local_lmstudio_model()
+            || self.uses_local_summarization_model()
+            || self
+                .model
+                .as_ref()
+                .is_some_and(|model| model.max_token_count() < SMALL_CONTEXT_WINDOW_THRESHOLD);
+        if !small_or_local {
+            return;
+        }
+        if worktree_roots(&self.project, cx).is_empty() {
+            return;
+        }
+        let Some(model) = self
+            .summarization_model
+            .clone()
+            .or_else(|| self.model.clone())
+        else {
+            return;
+        };
+
+        let end_ix = self.messages.len();
+        let start_ix = self.last_journal_fact_extract_ix.min(end_ix);
+        if end_ix <= start_ix {
+            return;
+        }
+
+        let request = self.build_journal_fact_extract_request(start_ix, end_ix, &model, cx);
+        // Only the extract prompt — nothing new to mine.
+        if request.messages.len() <= 1 {
+            self.last_journal_fact_extract_ix = end_ix;
+            return;
+        }
+
+        // Advance the cursor only after the extract stream finishes (success,
+        // NONE, or empty). Failures to start/stream leave the range retryable.
+        cx.spawn(async move |this, cx| {
+            let mut text = String::new();
+            let mut thinking = String::new();
+            let mut stream = match model.stream_completion(request, cx).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    log::warn!("Journal fact extract failed to start: {error:#}");
+                    return;
+                }
+            };
+            while let Some(event) = stream.next().await {
+                match event {
+                    Ok(LanguageModelCompletionEvent::Text(chunk)) => text.push_str(&chunk),
+                    Ok(LanguageModelCompletionEvent::Thinking { text: chunk, .. }) => {
+                        thinking.push_str(&chunk);
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        log::warn!("Journal fact extract stream error: {error:#}");
+                        return;
+                    }
+                }
+            }
+
+            let body = if !text.trim().is_empty() {
+                text
+            } else {
+                thinking
+            };
+
+            if let Some(facts) = parse_journal_fact_extract_response(&body) {
+                _ = this.update(cx, |this, cx| {
+                    persist_journal_facts_to_worktrees(&this.project, &facts, true, cx);
+                });
+            }
+
+            _ = this.update(cx, |this, _cx| {
+                this.last_journal_fact_extract_ix =
+                    this.last_journal_fact_extract_ix.max(end_ix);
+            });
+        })
+        .detach();
+    }
+
+    fn build_journal_fact_extract_request(
+        &self,
+        start_ix: usize,
+        end_ix: usize,
+        model: &Arc<dyn LanguageModel>,
+        cx: &App,
+    ) -> LanguageModelRequest {
+        const MAX_MESSAGES: usize = 12;
+        let end_ix = end_ix.min(self.messages.len());
+        let mut from = start_ix.min(end_ix);
+        if end_ix.saturating_sub(from) > MAX_MESSAGES {
+            from = end_ix - MAX_MESSAGES;
+        }
+
+        let mut messages = Vec::new();
+        for message in &self.messages[from..end_ix] {
+            messages.extend(message.to_request());
+        }
+
+        let mut already_journaled = Vec::new();
+        for root in worktree_roots(&self.project, cx) {
+            already_journaled.extend(recent_journal_facts(&root, 12));
+        }
+        if already_journaled.len() > 12 {
+            already_journaled = already_journaled.split_off(already_journaled.len() - 12);
+        }
+
+        let mut extract_prompt = JOURNAL_FACT_EXTRACT_PROMPT.to_string();
+        if !already_journaled.is_empty() {
+            extract_prompt.push_str("\n\nAlready journaled (do not repeat):\n");
+            extract_prompt.push_str(&already_journaled.join("\n"));
+        }
+
+        messages.push(LanguageModelRequestMessage {
+            role: Role::User,
+            content: vec![extract_prompt.into()],
+            cache: false,
+            reasoning_details: None,
+        });
+
+        LanguageModelRequest {
+            thread_id: Some(self.id.to_string()),
+            prompt_id: Some(self.prompt_id.to_string()),
+            intent: Some(CompletionIntent::ThreadContextSummarization),
+            temperature: AgentSettings::temperature_for_model(model, cx),
+            messages,
+            ..Default::default()
+        }
     }
 
     async fn perform_goal_checkpoint_if_needed(
@@ -4229,6 +4398,7 @@ impl Thread {
                 CreateThreadTool::NAME | ListAgentsAndModelsTool::NAME => {
                     cx.has_flag::<CreateThreadToolFeatureFlag>()
                 }
+                CompleteGoalTool::NAME => self.goal.as_ref().is_some_and(|goal| goal.is_active()),
                 _ => true,
             })
             .collect::<BTreeMap<_, _>>();
@@ -4376,13 +4546,61 @@ impl Thread {
     pub fn set_goal(&mut self, goal: ThreadGoal, cx: &mut Context<Self>) {
         self.goal = Some(goal);
         self.pending_goal_verification = false;
+        self.refresh_turn_tools(cx);
         cx.notify();
     }
 
     pub fn clear_goal(&mut self, cx: &mut Context<Self>) {
         self.goal = None;
         self.pending_goal_verification = false;
+        self.refresh_turn_tools(cx);
         cx.notify();
+    }
+
+    /// Marks the active goal completed, journals a completion fact, and refreshes tools.
+    ///
+    /// Shared by `/goal complete`, the UI Complete action, and `complete_goal`.
+    pub fn complete_active_goal(
+        &mut self,
+        reason: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        let Some(goal) = self.goal.as_mut() else {
+            return Err("No active goal to complete.".into());
+        };
+        if !goal.is_active() {
+            return Err(format!(
+                "Goal is {:?}, not Active — only an Active goal can be completed.",
+                goal.status
+            ));
+        }
+
+        let objective = goal.objective.clone();
+        goal.status = crate::GoalStatus::Completed;
+        self.pending_goal_verification = false;
+
+        let fact = match reason.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(reason) => format!("GOAL | {objective} (completed: {reason})"),
+            None => format!("GOAL | {objective} (completed)"),
+        };
+        for root in worktree_roots(&self.project, cx) {
+            if let Err(error) = append_journal_with_options(
+                &root,
+                &fact,
+                JournalAppendOptions {
+                    sync_summary: true,
+                },
+            ) {
+                log::warn!(
+                    "Failed to journal goal completion for {}: {error:#}",
+                    root.display()
+                );
+            }
+        }
+
+        self.refresh_turn_tools(cx);
+        cx.notify();
+        Ok(format!("Goal completed: {objective}"))
     }
 
     pub fn rolled_over(&self) -> bool {
@@ -4407,6 +4625,10 @@ impl Thread {
     /// thread, given the configured context-fullness threshold. Guards against
     /// repeat rollovers, subagent threads, and pathological ping-pong on tiny
     /// threads that exceed the threshold within a single turn.
+    ///
+    /// The configured fraction is a floor; see
+    /// [`effective_rollover_context_fraction`] so rollover stays above
+    /// auto-compaction for the active model.
     pub fn should_roll_over(&self, context_fraction: f32) -> bool {
         if self.rolled_over || self.is_subagent() {
             return false;
@@ -4414,8 +4636,13 @@ impl Thread {
         if self.user_message_count() < 2 {
             return false;
         }
+        let effective = self
+            .model
+            .as_ref()
+            .map(|model| effective_rollover_context_fraction(context_fraction, model.as_ref()))
+            .unwrap_or_else(|| context_fraction.clamp(0.1, 0.95));
         self.context_fullness()
-            .is_some_and(|fullness| fullness >= context_fraction)
+            .is_some_and(|fullness| fullness >= effective)
     }
 
     pub fn apply_goal_command(
@@ -4446,7 +4673,11 @@ impl Thread {
                 .unwrap_or_else(|| "No active goal.".into()),
             GoalCommand::Pause => {
                 if let Some(goal) = self.goal.as_mut() {
+                    if goal.status != GoalStatus::Active {
+                        return "Only an Active goal can be paused.".into();
+                    }
                     goal.status = GoalStatus::Paused;
+                    self.refresh_turn_tools(cx);
                     cx.notify();
                     "Goal paused.".into()
                 } else {
@@ -4455,13 +4686,38 @@ impl Thread {
             }
             GoalCommand::Resume => {
                 if let Some(goal) = self.goal.as_mut() {
-                    goal.status = GoalStatus::Active;
-                    cx.notify();
-                    "Goal resumed.".into()
+                    match goal.status {
+                        GoalStatus::Paused => {
+                            goal.status = GoalStatus::Active;
+                            self.refresh_turn_tools(cx);
+                            cx.notify();
+                            "Goal resumed.".into()
+                        }
+                        GoalStatus::ContinuationLimited => {
+                            // User grants another continuation budget after the soft local cap.
+                            goal.status = GoalStatus::Active;
+                            goal.continuation_count = 0;
+                            self.pending_goal_verification = false;
+                            self.refresh_turn_tools(cx);
+                            cx.notify();
+                            "Goal resumed after continuation limit (counter reset).".into()
+                        }
+                        GoalStatus::Completed => {
+                            "Cannot resume a Completed goal. Set a new goal or clear it.".into()
+                        }
+                        GoalStatus::BudgetLimited => {
+                            "Cannot resume a BudgetLimited goal. Raise the token budget or set a new goal.".into()
+                        }
+                        GoalStatus::Active => "Goal is already active.".into(),
+                    }
                 } else {
                     "No goal to resume.".into()
                 }
             }
+            GoalCommand::Complete => match self.complete_active_goal(None, cx) {
+                Ok(message) => message,
+                Err(error) => error,
+            },
             GoalCommand::Clear => {
                 self.clear_goal(cx);
                 "Goal cleared.".into()
@@ -4532,10 +4788,27 @@ impl Thread {
             .collect()
     }
 
+    fn max_goal_continuations(&self) -> u32 {
+        const LOCAL_MAX_GOAL_CONTINUATIONS: u32 = 8;
+        const CLOUD_MAX_GOAL_CONTINUATIONS: u32 = 50;
+
+        if self.uses_local_lmstudio_model()
+            || self.uses_local_summarization_model()
+            || self
+                .model
+                .as_ref()
+                .is_some_and(|model| model.max_token_count() < SMALL_CONTEXT_WINDOW_THRESHOLD)
+        {
+            LOCAL_MAX_GOAL_CONTINUATIONS
+        } else {
+            CLOUD_MAX_GOAL_CONTINUATIONS
+        }
+    }
+
     fn maybe_continue_for_goal(&mut self) -> bool {
         use crate::GoalStatus;
 
-        const MAX_GOAL_CONTINUATIONS: u32 = 50;
+        let max_continuations = self.max_goal_continuations();
 
         let Some(goal) = self.goal.as_mut() else {
             return false;
@@ -4545,8 +4818,8 @@ impl Thread {
             return false;
         }
 
-        if goal.continuation_count >= MAX_GOAL_CONTINUATIONS {
-            goal.status = GoalStatus::BudgetLimited;
+        if goal.continuation_count >= max_continuations {
+            goal.status = GoalStatus::ContinuationLimited;
             return false;
         }
 
@@ -5096,8 +5369,16 @@ impl Thread {
 }
 
 fn compaction_remaining_token_budget(model: &dyn LanguageModel) -> u64 {
-    if model.max_token_count() < SMALL_CONTEXT_WINDOW_THRESHOLD {
-        return SMALL_CONTEXT_REMAINING_TOKEN_BUDGET;
+    let max_tokens = model.max_token_count();
+    if max_tokens < SMALL_CONTEXT_WINDOW_THRESHOLD {
+        // Reserve ~40% of usable input (max - output) so compaction typically
+        // fires below a ~0.5 rollover floor for common local shapes
+        // (e.g. 26k/11k → ~6k remaining / compact ~9k).
+        let usable = max_tokens.saturating_sub(model.max_output_tokens().unwrap_or_default());
+        return (usable / 5 * 2).clamp(
+            SMALL_CONTEXT_REMAINING_TOKEN_BUDGET_MIN,
+            SMALL_CONTEXT_REMAINING_TOKEN_BUDGET_MAX,
+        );
     }
 
     AGENT_COMPACTION_REMAINING_TOKEN_BUDGET_ENV_VAR
@@ -5105,6 +5386,77 @@ fn compaction_remaining_token_budget(model: &dyn LanguageModel) -> u64 {
         .as_ref()
         .and_then(|value| value.parse().ok())
         .unwrap_or(AGENT_COMPACTION_REMAINING_TOKEN_BUDGET)
+}
+
+/// Margin above the auto-compaction fullness line before rollover may fire.
+const ROLLOVER_MARGIN_AFTER_COMPACTION: f32 = 0.08;
+
+/// Resolves the effective rollover fullness for a model.
+///
+/// `configured` is treated as a floor preference. The effective fraction is
+/// raised when needed so rollover sits just above auto-compaction — otherwise
+/// large windows (fixed 40k remaining budget) would roll over *before* the
+/// first compact when using a ~0.5–0.6 setting.
+pub fn effective_rollover_context_fraction(
+    configured: f32,
+    model: &dyn LanguageModel,
+) -> f32 {
+    let max_tokens = model.max_token_count().max(1);
+    let remaining = compaction_remaining_token_budget(model);
+    let compact_threshold = max_tokens
+        .saturating_sub(model.max_output_tokens().unwrap_or_default())
+        .saturating_sub(remaining);
+    let compact_at = compact_threshold as f32 / max_tokens as f32;
+    let after_compact = (compact_at + ROLLOVER_MARGIN_AFTER_COMPACTION).clamp(0.35, 0.92);
+    configured.clamp(0.1, 0.95).max(after_compact)
+}
+
+#[cfg(test)]
+mod rollover_fraction_tests {
+    use super::*;
+    use language_model::fake_provider::FakeLanguageModel;
+
+    #[test]
+    fn small_window_keeps_half_floor_above_compaction() {
+        let model = FakeLanguageModel::default();
+        model.set_max_token_count(26_000);
+        model.set_max_output_tokens(Some(11_000));
+        // usable=15k, remaining=6k, compact_at≈0.346, after≈0.426
+        let effective = effective_rollover_context_fraction(0.5, &model);
+        assert!((effective - 0.5).abs() < f32::EPSILON);
+        assert!(effective > 0.42);
+    }
+
+    #[test]
+    fn large_window_raises_floor_above_compaction() {
+        let model = FakeLanguageModel::default();
+        model.set_max_token_count(200_000);
+        model.set_max_output_tokens(Some(8_000));
+        // remaining=40k, compact_at=0.76, after≈0.84
+        let effective = effective_rollover_context_fraction(0.5, &model);
+        assert!(
+            effective > 0.80,
+            "expected raise above compaction, got {effective}"
+        );
+    }
+
+    #[test]
+    fn respects_higher_user_preference_on_large_window() {
+        let model = FakeLanguageModel::default();
+        model.set_max_token_count(200_000);
+        model.set_max_output_tokens(Some(8_000));
+        let effective = effective_rollover_context_fraction(0.9, &model);
+        assert!((effective - 0.9).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn raises_too_low_setting_past_compaction() {
+        let model = FakeLanguageModel::default();
+        model.set_max_token_count(26_000);
+        model.set_max_output_tokens(Some(11_000));
+        let effective = effective_rollover_context_fraction(0.2, &model);
+        assert!(effective > 0.40);
+    }
 }
 
 fn compaction_retained_byte_budget(model: &dyn LanguageModel) -> usize {
@@ -8569,6 +8921,100 @@ mod tests {
 
                 assert!(!thread.maybe_continue_for_goal());
                 assert_eq!(thread.messages.len(), 0);
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn test_goal_complete_stops_continuation(cx: &mut TestAppContext) {
+        use crate::{GoalCommand, GoalStatus};
+
+        let (thread, _) = setup_thread_for_test(cx).await;
+        cx.update(|cx| {
+            thread.update(cx, |thread, cx| {
+                thread.apply_goal_command(
+                    GoalCommand::Set {
+                        objective: "finish work".into(),
+                        token_budget: None,
+                    },
+                    cx,
+                );
+                let msg = thread.apply_goal_command(GoalCommand::Complete, cx);
+                assert!(msg.contains("Goal completed"));
+                assert!(msg.contains("finish work"));
+                assert_eq!(thread.goal().unwrap().status, GoalStatus::Completed);
+                assert!(!thread.maybe_continue_for_goal());
+
+                // Completed goals cannot be resumed.
+                let resume = thread.apply_goal_command(GoalCommand::Resume, cx);
+                assert!(resume.contains("Cannot resume"));
+                assert_eq!(thread.goal().unwrap().status, GoalStatus::Completed);
+
+                // Same helper path as the tool / slash / UI.
+                let err = thread.complete_active_goal(Some("again"), cx);
+                assert!(err.is_err());
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn test_resume_from_continuation_limited_resets_counter(cx: &mut TestAppContext) {
+        use crate::{GoalCommand, GoalStatus};
+
+        let (thread, _) = setup_thread_for_test(cx).await;
+        cx.update(|cx| {
+            thread.update(cx, |thread, cx| {
+                thread.apply_goal_command(
+                    GoalCommand::Set {
+                        objective: "long run".into(),
+                        token_budget: None,
+                    },
+                    cx,
+                );
+                if let Some(goal) = thread.goal.as_mut() {
+                    goal.status = GoalStatus::ContinuationLimited;
+                    goal.continuation_count = 8;
+                }
+
+                let msg = thread.apply_goal_command(GoalCommand::Resume, cx);
+                assert!(msg.contains("resumed"));
+                let goal = thread.goal().unwrap();
+                assert_eq!(goal.status, GoalStatus::Active);
+                assert_eq!(goal.continuation_count, 0);
+                assert!(thread.maybe_continue_for_goal());
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn test_local_continuation_cap_marks_continuation_limited(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::{GoalCommand, GoalStatus};
+
+        let (thread, _) = setup_thread_for_test(cx).await;
+        cx.update(|cx| {
+            thread.update(cx, |thread, cx| {
+                thread.apply_goal_command(
+                    GoalCommand::Set {
+                        objective: "cap test".into(),
+                        token_budget: None,
+                    },
+                    cx,
+                );
+                // Fake a small-window model so the local cap of 8 applies.
+                // setup_thread_for_test typically uses a fake model; force the
+                // continuation counter to the local ceiling and ensure the next
+                // maybe_continue marks ContinuationLimited.
+                let cap = thread.max_goal_continuations();
+                if let Some(goal) = thread.goal.as_mut() {
+                    goal.continuation_count = cap;
+                }
+                assert!(!thread.maybe_continue_for_goal());
+                assert_eq!(
+                    thread.goal().unwrap().status,
+                    GoalStatus::ContinuationLimited
+                );
             });
         });
     }

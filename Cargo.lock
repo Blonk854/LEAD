@@ -21405,6 +21405,7 @@ dependencies = [
  "language_model",
  "serde",
  "serde_json",
+ "settings",
  "url",
  "web_research",
  "web_search",
