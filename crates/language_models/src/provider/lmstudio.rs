@@ -344,83 +344,7 @@ impl LmStudioLanguageModel {
         &self,
         request: LanguageModelRequest,
     ) -> lmstudio::ChatCompletionRequest {
-        let mut messages = Vec::new();
-
-        for message in request.messages {
-            for content in message.content {
-                match content {
-                    MessageContent::Text(text) => add_message_content_part(
-                        lmstudio::MessagePart::Text { text },
-                        message.role,
-                        &mut messages,
-                    ),
-                    MessageContent::Thinking { .. } => {}
-                    MessageContent::RedactedThinking(_) => {}
-                    MessageContent::Image(image) => {
-                        add_message_content_part(
-                            lmstudio::MessagePart::Image {
-                                image_url: lmstudio::ImageUrl {
-                                    url: image.to_base64_url(),
-                                    detail: None,
-                                },
-                            },
-                            message.role,
-                            &mut messages,
-                        );
-                    }
-                    MessageContent::ToolUse(tool_use) => {
-                        let tool_call = lmstudio::ToolCall {
-                            id: tool_use.id.to_string(),
-                            content: lmstudio::ToolCallContent::Function {
-                                function: lmstudio::FunctionContent {
-                                    name: tool_use.name.to_string(),
-                                    arguments: serde_json::to_string(&tool_use.input)
-                                        .unwrap_or_default(),
-                                },
-                            },
-                        };
-
-                        if let Some(lmstudio::ChatMessage::Assistant { tool_calls, .. }) =
-                            messages.last_mut()
-                        {
-                            tool_calls.push(tool_call);
-                        } else {
-                            messages.push(lmstudio::ChatMessage::Assistant {
-                                content: None,
-                                tool_calls: vec![tool_call],
-                            });
-                        }
-                    }
-                    MessageContent::ToolResult(tool_result) => {
-                        let content: Vec<lmstudio::MessagePart> = tool_result
-                            .content
-                            .iter()
-                            .map(|part| match part {
-                                LanguageModelToolResultContent::Text(text) => {
-                                    lmstudio::MessagePart::Text {
-                                        text: text.to_string(),
-                                    }
-                                }
-                                LanguageModelToolResultContent::Image(image) => {
-                                    lmstudio::MessagePart::Image {
-                                        image_url: lmstudio::ImageUrl {
-                                            url: image.to_base64_url(),
-                                            detail: None,
-                                        },
-                                    }
-                                }
-                            })
-                            .collect();
-
-                        messages.push(lmstudio::ChatMessage::Tool {
-                            content: content.into(),
-                            tool_call_id: tool_result.tool_use_id.to_string(),
-                        });
-                    }
-                }
-            }
-        }
-
+        let messages = to_lmstudio_messages(request.messages);
         lmstudio::ChatCompletionRequest {
             model: self.model.name.clone(),
             messages,
@@ -776,6 +700,132 @@ fn tool_use_from_extracted(
         raw_input: call.raw_input,
         thought_signature: None,
     })
+}
+
+fn to_lmstudio_messages(
+    request_messages: Vec<language_model::LanguageModelRequestMessage>,
+) -> Vec<lmstudio::ChatMessage> {
+    let mut messages = Vec::new();
+    // Strict OpenAI-compatible servers (LM Studio) reject non-text parts in
+    // role:"tool" messages. Hold images from tool results and emit them as a
+    // follow-up user message after the contiguous tool-result block.
+    let mut pending_tool_images: Vec<lmstudio::MessagePart> = Vec::new();
+
+    for message in request_messages {
+        for content in message.content {
+            match content {
+                MessageContent::ToolResult(tool_result) => {
+                    let mut text_parts = Vec::new();
+                    let mut image_parts = Vec::new();
+                    for part in &tool_result.content {
+                        match part {
+                            LanguageModelToolResultContent::Text(text) => {
+                                text_parts.push(lmstudio::MessagePart::Text {
+                                    text: text.to_string(),
+                                });
+                            }
+                            LanguageModelToolResultContent::Image(image) => {
+                                image_parts.push(lmstudio::MessagePart::Image {
+                                    image_url: lmstudio::ImageUrl {
+                                        url: image.to_base64_url(),
+                                        detail: None,
+                                    },
+                                });
+                            }
+                        }
+                    }
+
+                    let tool_content = if text_parts.is_empty() {
+                        if image_parts.is_empty() {
+                            lmstudio::MessageContent::Plain(String::new())
+                        } else {
+                            lmstudio::MessageContent::Plain(format!(
+                                "[Tool `{}` returned an image; see following user message]",
+                                tool_result.tool_name
+                            ))
+                        }
+                    } else {
+                        text_parts.into()
+                    };
+
+                    messages.push(lmstudio::ChatMessage::Tool {
+                        content: tool_content,
+                        tool_call_id: tool_result.tool_use_id.to_string(),
+                    });
+
+                    if !image_parts.is_empty() {
+                        pending_tool_images.push(lmstudio::MessagePart::Text {
+                            text: format!("Image output from tool `{}`:", tool_result.tool_name),
+                        });
+                        pending_tool_images.extend(image_parts);
+                    }
+                }
+                other => {
+                    flush_pending_tool_images(&mut pending_tool_images, &mut messages);
+                    match other {
+                        MessageContent::Text(text) => add_message_content_part(
+                            lmstudio::MessagePart::Text { text },
+                            message.role,
+                            &mut messages,
+                        ),
+                        MessageContent::Thinking { .. } => {}
+                        MessageContent::RedactedThinking(_) => {}
+                        MessageContent::Image(image) => {
+                            add_message_content_part(
+                                lmstudio::MessagePart::Image {
+                                    image_url: lmstudio::ImageUrl {
+                                        url: image.to_base64_url(),
+                                        detail: None,
+                                    },
+                                },
+                                message.role,
+                                &mut messages,
+                            );
+                        }
+                        MessageContent::ToolUse(tool_use) => {
+                            let tool_call = lmstudio::ToolCall {
+                                id: tool_use.id.to_string(),
+                                content: lmstudio::ToolCallContent::Function {
+                                    function: lmstudio::FunctionContent {
+                                        name: tool_use.name.to_string(),
+                                        arguments: serde_json::to_string(&tool_use.input)
+                                            .unwrap_or_default(),
+                                    },
+                                },
+                            };
+
+                            if let Some(lmstudio::ChatMessage::Assistant { tool_calls, .. }) =
+                                messages.last_mut()
+                            {
+                                tool_calls.push(tool_call);
+                            } else {
+                                messages.push(lmstudio::ChatMessage::Assistant {
+                                    content: None,
+                                    tool_calls: vec![tool_call],
+                                });
+                            }
+                        }
+                        MessageContent::ToolResult(_) => unreachable!(),
+                    }
+                }
+            }
+        }
+    }
+
+    flush_pending_tool_images(&mut pending_tool_images, &mut messages);
+    messages
+}
+
+fn flush_pending_tool_images(
+    pending_tool_images: &mut Vec<lmstudio::MessagePart>,
+    messages: &mut Vec<lmstudio::ChatMessage>,
+) {
+    if pending_tool_images.is_empty() {
+        return;
+    }
+    messages.push(lmstudio::ChatMessage::User {
+        content: std::mem::take(pending_tool_images).into(),
+    });
 }
 
 fn add_message_content_part(
@@ -1134,6 +1184,85 @@ impl Render for ConfigurationView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use language_model::{
+        LanguageModelImage, LanguageModelRequestMessage, LanguageModelToolResult,
+    };
+
+    #[test]
+    fn tool_result_images_are_split_into_follow_up_user_message() {
+        // LM Studio rejects image_url parts inside role:"tool" content.
+        let messages = to_lmstudio_messages(vec![
+            LanguageModelRequestMessage {
+                role: Role::Assistant,
+                content: vec![MessageContent::ToolUse(LanguageModelToolUse {
+                    id: "call_1".into(),
+                    name: "computer_use".into(),
+                    is_input_complete: true,
+                    input: serde_json::json!({"action": "screenshot"}),
+                    raw_input: r#"{"action":"screenshot"}"#.into(),
+                    thought_signature: None,
+                })],
+                cache: false,
+                reasoning_details: None,
+            },
+            LanguageModelRequestMessage {
+                role: Role::User,
+                content: vec![MessageContent::ToolResult(LanguageModelToolResult {
+                    tool_use_id: "call_1".into(),
+                    tool_name: "computer_use".into(),
+                    is_error: false,
+                    content: vec![
+                        LanguageModelToolResultContent::Text(
+                            "monitor=primary size=100x100".into(),
+                        ),
+                        LanguageModelToolResultContent::Image(LanguageModelImage::from_source(
+                            "abc123",
+                        )),
+                    ],
+                    output: None,
+                })],
+                cache: false,
+                reasoning_details: None,
+            },
+        ]);
+
+        assert_eq!(messages.len(), 3);
+        match &messages[1] {
+            lmstudio::ChatMessage::Tool {
+                content,
+                tool_call_id,
+            } => {
+                assert_eq!(tool_call_id, "call_1");
+                let json = serde_json::to_value(content).unwrap();
+                assert!(
+                    json.as_str().is_some()
+                        || json
+                            .as_array()
+                            .is_some_and(|parts| parts.iter().all(|part| {
+                                part.get("type").and_then(|t| t.as_str()) == Some("text")
+                            })),
+                    "tool content must be text-only for LM Studio, got {json}"
+                );
+                let serialized = json.to_string();
+                assert!(
+                    !serialized.contains("image_url"),
+                    "tool message must not contain image_url, got {serialized}"
+                );
+            }
+            other => panic!("expected Tool message, got {other:?}"),
+        }
+        match &messages[2] {
+            lmstudio::ChatMessage::User { content } => {
+                let json = serde_json::to_value(content).unwrap();
+                let serialized = json.to_string();
+                assert!(
+                    serialized.contains("image_url"),
+                    "follow-up user message should carry the screenshot, got {serialized}"
+                );
+            }
+            other => panic!("expected User message with image, got {other:?}"),
+        }
+    }
 
     #[test]
     fn usage_only_chunk_with_empty_choices_is_not_an_error() {

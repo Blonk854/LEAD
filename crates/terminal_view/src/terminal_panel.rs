@@ -79,6 +79,10 @@ pub struct TerminalPanel {
     pub(crate) center: PaneGroup,
     fs: Arc<dyn Fs>,
     workspace: WeakEntity<Workspace>,
+    /// Owned project handle so `starts_open` can check worktrees without
+    /// re-entering `Workspace` while it is already being updated (e.g. during
+    /// `Dock::add_panel`).
+    project: Entity<Project>,
     pending_serialization: Task<Option<()>>,
     pending_terminals_to_add: usize,
     deferred_tasks: HashMap<TaskId, Task<()>>,
@@ -89,7 +93,7 @@ pub struct TerminalPanel {
 
 impl TerminalPanel {
     pub fn new(workspace: &Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let project = workspace.project();
+        let project = workspace.project().clone();
         let pane = new_terminal_pane(workspace.weak_handle(), project.clone(), false, window, cx);
         let center = PaneGroup::new(pane.clone());
         let terminal_panel = Self {
@@ -97,6 +101,7 @@ impl TerminalPanel {
             active_pane: pane,
             fs: workspace.app_state().fs.clone(),
             workspace: workspace.weak_handle(),
+            project,
             pending_serialization: Task::ready(None),
             pending_terminals_to_add: 0,
             deferred_tasks: HashMap::default(),
@@ -1546,13 +1551,12 @@ impl Panel for TerminalPanel {
         if !TerminalSettings::get_global(cx).starts_open {
             return false;
         }
-        self.workspace.upgrade().is_some_and(|workspace| {
-            let project = workspace.read(cx).project().read(cx);
-            project.visible_worktrees(cx).any(|tree| {
-                tree.read(cx)
-                    .root_entry()
-                    .is_some_and(|entry| entry.is_dir())
-            })
+        // Read the project entity directly — never `workspace.read` here.
+        // `Dock::add_panel` calls this while `Workspace` is already updating.
+        self.project.read(cx).visible_worktrees(cx).any(|tree| {
+            tree.read(cx)
+                .root_entry()
+                .is_some_and(|entry| entry.is_dir())
         })
     }
 
