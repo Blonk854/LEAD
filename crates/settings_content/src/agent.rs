@@ -71,6 +71,32 @@ pub enum ThinkingBlockDisplay {
     AlwaysCollapsed,
 }
 
+/// Which native-agent system prompt to send.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentPromptStyle {
+    /// Compact prompt for local models; full prompt for the hybrid orchestrator.
+    #[default]
+    Auto,
+    /// Always use the compact local-model prompt.
+    Compact,
+    /// Always use the full Claude-style prompt.
+    Full,
+}
+
 #[with_fallible_options]
 #[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, Default)]
 pub struct AgentSettingsContent {
@@ -146,6 +172,11 @@ pub struct AgentSettingsContent {
     ///
     /// Default: write
     pub default_profile: Option<Arc<str>>,
+    /// Which system prompt to send. `auto` uses a compact prompt for local
+    /// models and the full prompt for the hybrid network orchestrator.
+    ///
+    /// Default: auto
+    pub prompt_style: Option<AgentPromptStyle>,
     /// The available agent profiles.
     pub profiles: Option<IndexMap<Arc<str>, AgentProfileContent>>,
     /// Where to show a popup notification when the agent is waiting for user input.

@@ -925,6 +925,7 @@ mod tests {
             enabled: true,
             button: true,
             dock: DockPosition::Right,
+            starts_open: true,
             flexible: true,
             default_width: px(300.),
             default_height: px(600.),
@@ -939,6 +940,7 @@ mod tests {
             inline_alternatives: vec![],
             favorite_models: vec![],
             default_profile: AgentProfileId::default(),
+            prompt_style: Default::default(),
             profiles: Default::default(),
             notify_when_agent_waiting: NotifyWhenAgentWaiting::default(),
             play_sound_when_agent_done: PlaySoundWhenAgentDone::Never,
@@ -952,12 +954,15 @@ mod tests {
             message_editor_min_lines: 1,
             tool_permissions: Default::default(),
             sandbox_permissions: Default::default(),
+            full_access: Default::default(),
             show_turn_stats: false,
             show_merge_conflict_indicator: true,
             sidebar_side: Default::default(),
             thinking_display: Default::default(),
             network_agent: Default::default(),
             auto_thread_rollover: Default::default(),
+            anti_loop: Default::default(),
+            web_research: Default::default(),
         };
 
         cx.update(|cx| {

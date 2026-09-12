@@ -6,7 +6,7 @@ use crate::{
     HttpRequestTool, JournalAppendOptions, ListAgentsAndModelsTool, ListDirectoryTool,
     MovePathTool, ProcessControlTool, ProjectSnapshot, RagIngestTool, RagSearchTool, ReadFileTool,
     ReadJournalTool, RenameTool, ResearchWebTool, RunCodeTool, SandboxedTerminalTool,
-    SpawnAgentTool, SystemPromptTemplate, Template, Templates, TerminalTool, ThreadGoal,
+    SpawnAgentTool, SystemPromptTemplate, Templates, TerminalTool, ThreadGoal,
     ToolPermissionDecision, UpdatePlanTool, UpdateTitleTool, WebSearchTool, WriteFileTool,
     append_journal_with_options, decide_permission_from_settings, format_project_memory_context,
     parse_journal_fact_extract_response, persist_journal_facts_to_worktrees,
@@ -51,8 +51,9 @@ use language_model::{
     CompletionIntent, LanguageModel, LanguageModelCompletionError, LanguageModelCompletionEvent,
     LanguageModelId, LanguageModelImage, LanguageModelProviderId, LanguageModelRegistry,
     LanguageModelRequest, LanguageModelRequestMessage, LanguageModelRequestTool,
-    LanguageModelToolResult, LanguageModelToolResultContent, LanguageModelToolSchemaFormat,
-    LanguageModelToolUse, LanguageModelToolUseId, MessageContent, Role, SelectedModel, Speed,
+    LanguageModelToolChoice, LanguageModelToolResult, LanguageModelToolResultContent,
+    LanguageModelToolSchemaFormat, LanguageModelToolUse, LanguageModelToolUseId, MessageContent,
+    Role, SelectedModel, Speed,
     StopReason, TokenUsage, ZED_CLOUD_PROVIDER_ID,
 };
 use project::Project;
@@ -99,6 +100,8 @@ pub const MIN_LOCAL_COMPACTION_CONTEXT_WINDOW: u64 = 16_000;
 
 static LMSTUDIO_PROVIDER_ID: std::sync::LazyLock<LanguageModelProviderId> =
     std::sync::LazyLock::new(|| LanguageModelProviderId::new("lmstudio"));
+static OLLAMA_PROVIDER_ID: std::sync::LazyLock<LanguageModelProviderId> =
+    std::sync::LazyLock::new(|| LanguageModelProviderId::new("ollama"));
 
 /// Tools exposed on the network orchestrator main thread when hybrid balanced
 /// delegation is active. Subagents retain the full profile tool set.
@@ -1326,6 +1329,8 @@ pub struct Thread {
     last_journal_fact_extract_ix: usize,
     /// Hybrid worker-pool id assigned to this subagent thread, if any.
     assigned_worker_id: Option<String>,
+    /// Last built request's system+tools token estimate (bytes/4).
+    last_request_overhead_tokens: u64,
 }
 
 impl Thread {
@@ -1475,6 +1480,7 @@ impl Thread {
             rolled_over: false,
             last_journal_fact_extract_ix: 0,
             assigned_worker_id: None,
+            last_request_overhead_tokens: 0,
         }
     }
 
@@ -1914,6 +1920,7 @@ impl Thread {
             rolled_over: db_thread.rolled_over,
             last_journal_fact_extract_ix: 0,
             assigned_worker_id: None,
+            last_request_overhead_tokens: 0,
         };
         if thread.subagent_context.is_none() {
             thread.ensure_network_agent_main_thread_model(cx);
@@ -2685,7 +2692,7 @@ impl Thread {
                         .unwrap_or(false);
                 handoff_or_goal
                     || this
-                        .read_with(cx, |thread, _| thread.uses_local_lmstudio_model())
+                        .read_with(cx, |thread, _| thread.uses_local_runtime())
                         .unwrap_or(false)
             });
 
@@ -3204,7 +3211,7 @@ impl Thread {
         }
         // Auto-extract is aimed at small/local windows where HOT is scarce.
         // Large cloud threads already keep more history in-context.
-        let small_or_local = self.uses_local_lmstudio_model()
+        let small_or_local = self.uses_local_runtime()
             || self.uses_local_summarization_model()
             || self
                 .model
@@ -4277,7 +4284,7 @@ impl Thread {
     }
 
     pub(crate) fn build_completion_request(
-        &self,
+        &mut self,
         completion_intent: CompletionIntent,
         cx: &App,
     ) -> Result<LanguageModelRequest> {
@@ -4321,13 +4328,19 @@ impl Thread {
         let messages = self.build_request_messages(available_tools, cx);
         log::debug!("Request will include {} messages", messages.len());
 
+        let tool_choice = if model.supports_tool_choice(LanguageModelToolChoice::Auto) {
+            Some(LanguageModelToolChoice::Auto)
+        } else {
+            None
+        };
+
         let request = LanguageModelRequest {
             thread_id: Some(self.id.to_string()),
             prompt_id: Some(self.prompt_id.to_string()),
             intent: Some(completion_intent),
             messages,
             tools,
-            tool_choice: None,
+            tool_choice,
             stop: Vec::new(),
             temperature: AgentSettings::temperature_for_model(model, cx),
             thinking_allowed: self.thinking_enabled,
@@ -4335,6 +4348,15 @@ impl Thread {
             speed: self.speed(),
         };
 
+        let (system_bytes, tools_bytes) = request_overhead_bytes(&request);
+        self.last_request_overhead_tokens = ((system_bytes + tools_bytes) / 4) as u64;
+        log::debug!(
+            "agent request overhead: system={} tools={} tool_count={} est_tokens={}",
+            system_bytes,
+            tools_bytes,
+            request.tools.len(),
+            self.last_request_overhead_tokens
+        );
         log::debug!("Completion request built successfully");
         Ok(request)
     }
@@ -4735,6 +4757,14 @@ impl Thread {
             return Vec::new();
         };
 
+        if pending
+            .content
+            .iter()
+            .any(|content| matches!(content, AgentMessageContent::ToolUse(_)))
+        {
+            return Vec::new();
+        }
+
         let assistant_text: String = pending
             .content
             .iter()
@@ -4792,7 +4822,7 @@ impl Thread {
         const LOCAL_MAX_GOAL_CONTINUATIONS: u32 = 8;
         const CLOUD_MAX_GOAL_CONTINUATIONS: u32 = 50;
 
-        if self.uses_local_lmstudio_model()
+        if self.uses_local_runtime()
             || self.uses_local_summarization_model()
             || self
                 .model
@@ -4878,6 +4908,7 @@ impl Thread {
         } else {
             None
         };
+        let compact = agent_settings.prompt_style_is_compact(hybrid_mode);
         let system_prompt = SystemPromptTemplate {
             project: self.project_context.read(cx),
             available_tools,
@@ -4894,7 +4925,7 @@ impl Thread {
                     == NetworkAgentDelegationMode::Balanced,
             full_access: agent_settings.full_access_enabled(),
         }
-        .render(&self.templates)
+        .render_for_style(&self.templates, compact)
         .context("failed to build system prompt")
         .expect("Invalid template");
         let mut messages = vec![LanguageModelRequestMessage {
@@ -4948,7 +4979,7 @@ impl Thread {
     fn min_compaction_context_window(&self) -> u64 {
         if self.goal.as_ref().is_some_and(|goal| goal.is_active()) {
             MIN_GOAL_COMPACTION_CONTEXT_WINDOW
-        } else if self.uses_local_lmstudio_model() || self.uses_local_summarization_model() {
+        } else if self.uses_local_runtime() || self.uses_local_summarization_model() {
             MIN_LOCAL_COMPACTION_CONTEXT_WINDOW
         } else {
             MIN_COMPACTION_CONTEXT_WINDOW
@@ -4959,6 +4990,24 @@ impl Thread {
         self.model
             .as_ref()
             .is_some_and(|model| model.provider_id() == *LMSTUDIO_PROVIDER_ID)
+    }
+
+    fn uses_local_ollama_model(&self) -> bool {
+        self.model
+            .as_ref()
+            .is_some_and(|model| model.provider_id() == *OLLAMA_PROVIDER_ID)
+    }
+
+    fn uses_local_runtime(&self) -> bool {
+        let Some(model) = self.model.as_ref() else {
+            return false;
+        };
+        if model.provider_id().0.as_ref() == AgentSettings::NETWORK_AGENT_PROVIDER_ID {
+            return false;
+        }
+        self.uses_local_lmstudio_model()
+            || self.uses_local_ollama_model()
+            || model.max_token_count() < SMALL_CONTEXT_WINDOW_THRESHOLD
     }
 
     fn uses_local_summarization_model(&self) -> bool {
@@ -5040,6 +5089,7 @@ impl Thread {
         }
         ((text_bytes / 4) as u64)
             .saturating_add(image_tokens)
+            .saturating_add(self.last_request_overhead_tokens)
             .max(1)
     }
 
@@ -5075,7 +5125,7 @@ impl Thread {
         let active_tokens = if reported_tokens > 0 {
             reported_tokens
         } else if self.goal.as_ref().is_some_and(|goal| goal.is_active())
-            || self.uses_local_lmstudio_model()
+            || self.uses_local_runtime()
             || self.uses_local_summarization_model()
         {
             self.estimate_context_tokens(usage_ix.saturating_add(1))
@@ -5465,6 +5515,19 @@ fn compaction_retained_byte_budget(model: &dyn LanguageModel) -> usize {
     } else {
         COMPACTION_RETAINED_USER_MESSAGES_BYTE_BUDGET
     }
+}
+
+fn request_overhead_bytes(request: &LanguageModelRequest) -> (usize, usize) {
+    let system_bytes = request
+        .messages
+        .iter()
+        .filter(|message| message.role == Role::System)
+        .map(|message| message.string_contents().len())
+        .sum();
+    let tools_bytes = serde_json::to_vec(&request.tools)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
+    (system_bytes, tools_bytes)
 }
 
 fn total_input_tokens(usage: language_model::TokenUsage) -> u64 {

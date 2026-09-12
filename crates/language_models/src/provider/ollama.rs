@@ -12,6 +12,7 @@ use language_model::{
     LanguageModelProviderId, LanguageModelProviderName, LanguageModelProviderState,
     LanguageModelRequest, LanguageModelRequestTool, LanguageModelToolChoice, LanguageModelToolUse,
     LanguageModelToolUseId, MessageContent, RateLimiter, Role, StopReason, TokenUsage, env_var,
+    extract_tool_calls_from_text,
 };
 use menu;
 use ollama::{
@@ -453,7 +454,7 @@ impl OllamaLanguageModel {
                 } else {
                     Some(request.stop)
                 },
-                temperature: request.temperature.or(Some(1.0)),
+                temperature: request.temperature,
                 ..Default::default()
             }),
             think: self
@@ -559,6 +560,7 @@ fn map_to_language_model_completion_events(
     struct State {
         stream: Pin<Box<dyn Stream<Item = anyhow::Result<ChatResponseDelta>> + Send>>,
         used_tools: bool,
+        assistant_text: String,
     }
 
     // We need to create a ToolUse and Stop event from a single
@@ -567,6 +569,7 @@ fn map_to_language_model_completion_events(
         State {
             stream,
             used_tools: false,
+            assistant_text: String::new(),
         },
         async move |mut state| {
             let response = state.stream.next().await?;
@@ -604,19 +607,25 @@ fn map_to_language_model_completion_events(
                         }));
                     }
 
-                    if let Some(tool_call) = tool_calls.and_then(|v| v.into_iter().next()) {
-                        let OllamaToolCall { id, function } = tool_call;
-                        let event = LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
-                            id: LanguageModelToolUseId::from(id),
-                            name: Arc::from(function.name),
-                            raw_input: function.arguments.to_string(),
-                            input: function.arguments,
-                            is_input_complete: true,
-                            thought_signature: None,
-                        });
-                        events.push(Ok(event));
-                        state.used_tools = true;
-                    } else if !content.is_empty() {
+                    if let Some(tool_calls) = tool_calls {
+                        for tool_call in tool_calls {
+                            let OllamaToolCall { id, function } = tool_call;
+                            events.push(Ok(LanguageModelCompletionEvent::ToolUse(
+                                LanguageModelToolUse {
+                                    id: LanguageModelToolUseId::from(id),
+                                    name: Arc::from(function.name),
+                                    raw_input: function.arguments.to_string(),
+                                    input: function.arguments,
+                                    is_input_complete: true,
+                                    thought_signature: None,
+                                },
+                            )));
+                            state.used_tools = true;
+                        }
+                    }
+
+                    if !content.is_empty() {
+                        state.assistant_text.push_str(&content);
                         events.push(Ok(LanguageModelCompletionEvent::Text(content)));
                     }
                 }
@@ -629,8 +638,27 @@ fn map_to_language_model_completion_events(
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 0,
                 })));
+                if !state.used_tools {
+                    let extracted = extract_tool_calls_from_text(&state.assistant_text, &[]);
+                    if !extracted.is_empty() {
+                        for (index, call) in extracted.into_iter().enumerate() {
+                            events.push(Ok(LanguageModelCompletionEvent::ToolUse(
+                                LanguageModelToolUse {
+                                    id: LanguageModelToolUseId::from(format!(
+                                        "embedded_tool_{index}"
+                                    )),
+                                    name: call.name,
+                                    raw_input: call.raw_input,
+                                    input: call.input,
+                                    is_input_complete: true,
+                                    thought_signature: None,
+                                },
+                            )));
+                        }
+                        state.used_tools = true;
+                    }
+                }
                 if state.used_tools {
-                    state.used_tools = false;
                     events.push(Ok(LanguageModelCompletionEvent::Stop(StopReason::ToolUse)));
                 } else {
                     events.push(Ok(LanguageModelCompletionEvent::Stop(StopReason::EndTurn)));
@@ -1096,11 +1124,13 @@ fn merge_settings_into_models(
 }
 
 fn tool_into_ollama(tool: LanguageModelRequestTool) -> ollama::OllamaTool {
+    let mut parameters = tool.input_schema;
+    language_model::minify_tool_schema_for_local(&mut parameters);
     ollama::OllamaTool::Function {
         function: OllamaFunctionTool {
             name: tool.name,
             description: Some(tool.description),
-            parameters: Some(tool.input_schema),
+            parameters: Some(parameters),
         },
     }
 }
@@ -1182,5 +1212,84 @@ mod tests {
             "3b model should have its own display_name"
         );
         assert_eq!(model_3b.max_tokens, 6000);
+    }
+
+    #[test]
+    fn maps_all_native_ollama_tool_calls() {
+        use futures::executor::block_on;
+        use serde_json::json;
+
+        let deltas = vec![Ok(ChatResponseDelta {
+            model: "qwen".into(),
+            created_at: String::new(),
+            message: ChatMessage::Assistant {
+                content: String::new(),
+                tool_calls: Some(vec![
+                    OllamaToolCall {
+                        id: "1".into(),
+                        function: OllamaFunctionCall {
+                            name: "read_file".into(),
+                            arguments: json!({"path": "a.rs"}),
+                        },
+                    },
+                    OllamaToolCall {
+                        id: "2".into(),
+                        function: OllamaFunctionCall {
+                            name: "grep".into(),
+                            arguments: json!({"regex": "foo"}),
+                        },
+                    },
+                ]),
+                images: None,
+                thinking: None,
+            },
+            done_reason: None,
+            done: true,
+            prompt_eval_count: Some(10),
+            eval_count: Some(2),
+        })];
+        let events: Vec<_> = block_on(
+            map_to_language_model_completion_events(Box::pin(futures::stream::iter(deltas)))
+                .collect::<Vec<_>>(),
+        );
+        let tool_uses = events
+            .iter()
+            .filter(|event| matches!(event, Ok(LanguageModelCompletionEvent::ToolUse(_))))
+            .count();
+        assert_eq!(tool_uses, 2);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Ok(LanguageModelCompletionEvent::Stop(StopReason::ToolUse))
+        )));
+    }
+
+    #[test]
+    fn extracts_embedded_xml_tool_calls_when_ollama_omits_native_tools() {
+        use futures::executor::block_on;
+
+        let deltas = vec![Ok(ChatResponseDelta {
+            model: "qwen".into(),
+            created_at: String::new(),
+            message: ChatMessage::Assistant {
+                content: "<function=read_file><parameter=path>src/main.rs</parameter></function>"
+                    .into(),
+                tool_calls: None,
+                images: None,
+                thinking: None,
+            },
+            done_reason: None,
+            done: true,
+            prompt_eval_count: Some(10),
+            eval_count: Some(2),
+        })];
+        let events: Vec<_> = block_on(
+            map_to_language_model_completion_events(Box::pin(futures::stream::iter(deltas)))
+                .collect::<Vec<_>>(),
+        );
+        let tool_use = events.iter().find_map(|event| match event {
+            Ok(LanguageModelCompletionEvent::ToolUse(tool_use)) => Some(tool_use),
+            _ => None,
+        });
+        assert_eq!(tool_use.map(|call| call.name.as_ref()), Some("read_file"));
     }
 }

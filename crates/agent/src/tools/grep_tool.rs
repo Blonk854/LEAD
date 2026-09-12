@@ -16,37 +16,12 @@ use util::RangeExt;
 use util::markdown::MarkdownInlineCode;
 use util::paths::PathMatcher;
 
-/// Searches the contents of files in the project with a regular expression
-///
-/// - Prefer this tool to path search when searching for symbols in the project, because you won't need to guess what path it's in.
-/// - Supports full regex syntax (eg. "log.*Error", "function\\s+\\w+", etc.)
-/// - Pass an `include_pattern` if you know how to narrow your search on the files system
-/// - Never use this tool to search for paths. Only search file contents with this tool.
-/// - Use this tool when you need to find files containing specific patterns
-/// - Results are paginated with 20 matches per page. Use the optional 'offset' parameter to request subsequent pages.
-/// - DO NOT use HTML entities solely to escape characters in the tool parameters.
+/// Regex search of file contents. Optional include_pattern glob. Paginated, 20 hits, use offset.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GrepToolInput {
-    /// A regex pattern to search for in the entire project. Note that the regex will be parsed by the Rust `regex` crate.
-    ///
-    /// Do NOT specify a path here! This will only be matched against the code **content**.
+    /// Regex matched against file contents (Rust regex crate). Not a path.
     pub regex: String,
-    /// A glob pattern for the paths of files to include in the search.
-    /// Supports standard glob patterns like "**/*.rs" or "frontend/src/**/*.ts".
-    /// If omitted, all files in the project will be searched.
-    ///
-    /// The glob pattern is matched against the full path including the project root directory.
-    ///
-    /// <example>
-    /// If the project has the following root directories:
-    ///
-    /// - /a/b/backend
-    /// - /c/d/frontend
-    ///
-    /// Use "backend/**/*.rs" to search only Rust files in the backend root directory.
-    /// Use "frontend/src/**/*.ts" to search TypeScript files only in the frontend root directory (sub-directory "src").
-    /// Use "**/*.rs" to search Rust files across all root directories.
-    /// </example>
+    /// Optional glob such as `**/*.rs` or `backend/src/**/*.ts`.
     pub include_pattern: Option<String>,
     /// Optional absolute directory to search outside the project. Requires
     /// guard-railed full PC access and user authorization.

@@ -16,7 +16,7 @@ use settings::{
     DockPosition, DockSide, LanguageModelParameters, LanguageModelProviderSetting,
     LanguageModelSelection, NotifyWhenAgentWaiting, PlaySoundWhenAgentDone, RegisterSetting,
     Settings, SettingsContent, SettingsStore, SidebarDockPosition, SidebarSide,
-    ThinkingBlockDisplay, ToolPermissionMode, update_settings_file,
+    AgentPromptStyle, ThinkingBlockDisplay, ToolPermissionMode, update_settings_file,
     update_settings_file_with_completion,
 };
 
@@ -161,6 +161,7 @@ pub struct AgentSettings {
     pub inline_alternatives: Vec<LanguageModelSelection>,
     pub favorite_models: Vec<LanguageModelSelection>,
     pub default_profile: AgentProfileId,
+    pub prompt_style: AgentPromptStyle,
     pub profiles: IndexMap<AgentProfileId, AgentProfileSettings>,
 
     pub notify_when_agent_waiting: NotifyWhenAgentWaiting,
@@ -474,6 +475,16 @@ impl AgentSettings {
     /// Whether guard-railed whole-PC native tools may be exposed.
     pub fn full_access_enabled(&self) -> bool {
         self.full_access.enabled
+    }
+
+    /// Compact local prompt, unless the user forced `full` or this is the
+    /// hybrid orchestrator under `auto`.
+    pub fn prompt_style_is_compact(&self, hybrid_orchestrator: bool) -> bool {
+        match self.prompt_style {
+            AgentPromptStyle::Compact => true,
+            AgentPromptStyle::Full => false,
+            AgentPromptStyle::Auto => !hybrid_orchestrator,
+        }
     }
 
     pub fn network_agent_delegation_mode(&self) -> NetworkAgentDelegationMode {
@@ -1004,6 +1015,7 @@ impl Settings for AgentSettings {
             inline_alternatives: agent.inline_alternatives.unwrap_or_default(),
             favorite_models: agent.favorite_models,
             default_profile: AgentProfileId(agent.default_profile.unwrap()),
+            prompt_style: agent.prompt_style.unwrap_or_default(),
             profiles: agent
                 .profiles
                 .unwrap()
@@ -2378,6 +2390,7 @@ mod tests {
             inline_alternatives: vec![],
             favorite_models: vec![],
             default_profile: AgentProfileId::default(),
+            prompt_style: AgentPromptStyle::Auto,
             profiles: Default::default(),
             notify_when_agent_waiting: settings::NotifyWhenAgentWaiting::default(),
             play_sound_when_agent_done: settings::PlaySoundWhenAgentDone::Never,

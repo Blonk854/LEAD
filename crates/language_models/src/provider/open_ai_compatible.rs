@@ -71,7 +71,9 @@ pub fn normalize_local_openai_tool_parameters(schema: serde_json::Value) -> serd
     if !map.contains_key("type") {
         map.insert("type".into(), serde_json::json!("object"));
     }
-    serde_json::Value::Object(map)
+    let mut value = serde_json::Value::Object(map);
+    language_model::minify_tool_schema_for_local(&mut value);
+    value
 }
 
 /// Adjusts a chat-completions payload for local OpenAI-compatible servers.

@@ -2,7 +2,7 @@
 //!
 //! Used by the agent panel UI and by `script/run-local-tool-eval-matrix`.
 
-use crate::{SystemPromptTemplate, Templates, built_in_tools, templates::Template};
+use crate::{SystemPromptTemplate, Templates, built_in_tools};
 use anyhow::Result;
 use futures::{StreamExt as _, future::select};
 use gpui::AsyncApp;
@@ -274,7 +274,7 @@ async fn run_case_once(
             balanced_delegation: false,
             full_access: false,
         }
-        .render(&Templates::new())?
+        .render_for_style(&Templates::new(), true)?
     };
 
     let request = LanguageModelRequest {

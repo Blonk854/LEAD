@@ -21,41 +21,10 @@ use ui::SharedString;
 
 const DEFAULT_UI_TEXT: &str = "Editing file";
 
-/// This is a tool for applying edits to an existing file.
-///
-/// Before using this tool, use the `read_file` tool to understand the file's contents and context.
-/// To create a new file or overwrite an existing one with completely new contents, use the `write_file` tool instead.
-///
-/// The only supported path outside the project is `~/.agents/skills` or a descendant, for global agent skills.
-///
-/// `read_file` prefixes each line of its output with a line number right-aligned in a
-/// 6-character field followed by a single tab, then the line's actual content. When you
-/// derive `old_text` or `new_text` from that output, strip this prefix and keep only what
-/// comes after the tab, preserving the original indentation (tabs and spaces) exactly.
-/// Never include any part of the line number prefix in `old_text` or `new_text`.
+/// Apply sequential old_text→new_text replacements. Path must start with a project root. Strip read_file line-number prefixes.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct EditFileToolInput {
-    /// The full path of the file to edit in the project.
-    ///
-    /// WARNING: When specifying which file path need changing, you MUST start each path with one of the project's root directories, unless it's a global agent skill under `~/.agents/skills`.
-    ///
-    /// The following examples assume we have two root directories in the project:
-    /// - /a/b/backend
-    /// - /c/d/frontend
-    ///
-    /// <example>
-    /// `backend/src/main.rs`
-    ///
-    /// Notice how the file path starts with `backend`. Without that, the path would be ambiguous and the call would fail!
-    /// </example>
-    ///
-    /// <example>
-    /// `frontend/db.js`
-    /// </example>
-    ///
-    /// <example>
-    /// To edit a global agent skill file, you may provide a path under `~/.agents/skills`, such as `~/.agents/skills/my-skill/SKILL.md`.
-    /// </example>
+    /// Project-relative path starting with a worktree root name.
     pub path: PathBuf,
 
     /// List of edit operations to apply sequentially.

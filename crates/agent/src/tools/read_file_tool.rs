@@ -147,35 +147,10 @@ use super::tool_permissions::{
 };
 use crate::{AgentTool, ToolCallEventStream, ToolInput, outline};
 
-/// Reads the content of the given file in the project.
-///
-/// - Never attempt to read a path that hasn't been previously mentioned.
-/// - For large files, this tool returns a file outline with symbol names and line numbers instead of the full content.
-///   This outline IS a successful response - use the line numbers to read specific sections with start_line/end_line.
-///   Do NOT retry reading the same file without line numbers if you receive an outline.
-/// - This tool supports reading image files. Supported formats: PNG, JPEG, WebP, GIF, BMP, TIFF.
-///   Image files are returned as visual content that you can analyze directly.
-///
-/// The only supported path outside the project is `~/.agents/skills` or a descendant, for global agent skills.
+/// Read a file. Optional 1-indexed start_line/end_line. Large files return a symbol outline.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ReadFileToolInput {
-    /// The relative path of the file to read.
-    ///
-    /// This path should never be absolute, and the first component of the path should always be a root directory in a project, unless it's a global agent skill under `~/.agents/skills`.
-    ///
-    /// <example>
-    /// If the project has the following root directories:
-    ///
-    /// - /a/b/directory1
-    /// - /c/d/directory2
-    ///
-    /// If you want to access `file.txt` in `directory1`, you should use the path `directory1/file.txt`.
-    /// If you want to access `file.txt` in `directory2`, you should use the path `directory2/file.txt`.
-    /// </example>
-    ///
-    /// <example>
-    /// To read a global agent skill file, you may provide a path under `~/.agents/skills`, such as `~/.agents/skills/my-skill/SKILL.md`.
-    /// </example>
+    /// Project-relative path starting with a worktree root name.
     pub path: String,
     /// Optional line number to start reading on (1-based index)
     #[serde(default)]

@@ -69,6 +69,20 @@ impl Template for SystemPromptTemplate<'_> {
     const TEMPLATE_NAME: &'static str = "system_prompt.hbs";
 }
 
+impl SystemPromptTemplate<'_> {
+    pub fn render_for_style(&self, templates: &Templates, compact: bool) -> Result<String>
+    where
+        Self: Serialize,
+    {
+        let name = if compact {
+            "system_prompt_local.hbs"
+        } else {
+            Self::TEMPLATE_NAME
+        };
+        Ok(templates.0.render(name, self)?)
+    }
+}
+
 /// Handlebars helper for checking if an item is in a list
 fn contains(
     h: &handlebars::Helper,
@@ -329,5 +343,57 @@ mod tests {
         assert!(rendered.contains("Hybrid orchestrator mode"));
         assert!(rendered.contains("lmstudio/local-model"));
         assert!(rendered.contains("Balanced delegation is enabled"));
+    }
+
+    fn compact_local_template(project: &prompt_store::ProjectContext) -> SystemPromptTemplate<'_> {
+        SystemPromptTemplate {
+            project,
+            available_tools: vec![
+                "read_file".into(),
+                "grep".into(),
+                "edit_file".into(),
+                "write_file".into(),
+                "terminal".into(),
+                "update_title".into(),
+            ],
+            model_name: Some("qwen3-14b".into()),
+            date: "2026-01-01".into(),
+            user_agents_md: None,
+            sandboxing: false,
+            active_goal: None,
+            project_memory: None,
+            hybrid_mode: false,
+            local_worker_model: None,
+            balanced_delegation: false,
+            full_access: false,
+        }
+    }
+
+    #[test]
+    fn test_compact_system_prompt_is_short_and_retains_path_rules() {
+        let project = prompt_store::ProjectContext::default();
+        let rendered = compact_local_template(&project)
+            .render_for_style(&Templates::new(), true)
+            .unwrap();
+        assert!(rendered.contains("You are the LEAD coding agent"));
+        assert!(rendered.contains("strip the leading line number"));
+        assert!(rendered.contains("update_title"));
+        assert!(!rendered.contains("## Ambition vs. Precision"));
+        assert!(!rendered.contains("## Calling External APIs"));
+        assert!(!rendered.contains("mermaid"));
+        assert!(
+            rendered.len() < 8_000,
+            "compact prompt too large: {} bytes",
+            rendered.len()
+        );
+    }
+
+    #[test]
+    fn test_full_style_still_renders_long_prompt() {
+        let project = prompt_store::ProjectContext::default();
+        let rendered = compact_local_template(&project)
+            .render_for_style(&Templates::new(), false)
+            .unwrap();
+        assert!(rendered.contains("## Ambition vs. Precision"));
     }
 }

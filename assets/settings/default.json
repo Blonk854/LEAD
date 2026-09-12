@@ -1099,7 +1099,7 @@
     // spawn_agent subtasks. Configure the network-agent openai_compatible
     // provider and optional workers endpoints in settings.
     "network_agent": {
-      "enabled": true,
+      "enabled": false,
       "delegation_mode": "balanced",
       "workers": {
         "scheduling": "least_busy",
@@ -1113,7 +1113,7 @@
     // Absolute paths under allowed_roots do not trigger an escape prompt;
     // denied_roots augment LEAD's unbypassable catastrophic-path denylist.
     "full_access": {
-      "enabled": true,
+      "enabled": false,
       "allowed_roots": [],
       "denied_roots": []
     },
@@ -1161,7 +1161,9 @@
       "cache_ttl_serp_secs": 3600,
       "cache_ttl_page_secs": 604800
     },
-    "default_profile": "hybrid",
+    // auto: compact prompt for local models; full prompt for the hybrid orchestrator.
+    "prompt_style": "auto",
+    "default_profile": "local-agent",
     "profiles": {
       "local-agent": {
         "name": "Local Agent",
@@ -1173,16 +1175,11 @@
           "append_to_journal": true,
           "complete_goal": true,
           "read_journal": true,
-          "rag_ingest": true,
-          "rag_search": true,
           "find_path": true,
           "edit_file": true,
           "write_file": true,
           "terminal": true,
           "diagnostics": true,
-          "fetch": true,
-          "search_web": true,
-          "research_web": true,
           "create_directory": true,
           "copy_path": true,
           "move_path": true,

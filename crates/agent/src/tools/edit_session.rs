@@ -39,19 +39,12 @@ pub(crate) enum EditSessionMode {
     Edit,
 }
 
-/// A single edit operation that replaces old text with new text
-/// Properly escape all text fields as valid JSON strings.
-/// Remember to escape special characters like newlines (`\n`) and quotes (`"`) in JSON strings.
+/// One old_text → new_text replacement. old_text is fuzzy-matched on whitespace.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Edit {
-    /// The exact text to find in the file. This will be matched using fuzzy matching
-    /// to handle minor differences in whitespace or formatting.
-    ///
-    /// Be minimal with replacements:
-    /// - For unique lines, include only those lines
-    /// - For non-unique lines, include enough context to identify them
+    /// Exact file text to find. Strip read_file line-number prefixes.
     pub old_text: String,
-    /// The text to replace it with
+    /// Replacement text.
     pub new_text: String,
 }
 
@@ -516,13 +509,39 @@ impl EditPipeline {
                 if !chunk.is_empty() {
                     matcher.push(chunk, None);
                 }
-                let range = extract_match(
-                    matcher.finish(),
-                    buffer,
-                    edit_index,
-                    self.file_changed_since_last_read,
-                    cx,
-                )?;
+                let matches = matcher.finish();
+                let range = if matches.is_empty() {
+                    let raw_query = matcher.query_lines().join("\n");
+                    let normalized = normalize_local_model_edit_text(&raw_query);
+                    if normalized != raw_query.replace("\r\n", "\n") && !normalized.is_empty() {
+                        let snapshot = buffer.read_with(cx, |buffer, _cx| buffer.text_snapshot());
+                        let mut retry = StreamingFuzzyMatcher::new(snapshot);
+                        retry.push(&normalized, None);
+                        extract_match(
+                            retry.finish(),
+                            buffer,
+                            edit_index,
+                            self.file_changed_since_last_read,
+                            cx,
+                        )?
+                    } else {
+                        extract_match(
+                            matches,
+                            buffer,
+                            edit_index,
+                            self.file_changed_since_last_read,
+                            cx,
+                        )?
+                    }
+                } else {
+                    extract_match(
+                        matches,
+                        buffer,
+                        edit_index,
+                        self.file_changed_since_last_read,
+                        cx,
+                    )?
+                };
 
                 let anchor_range =
                     buffer.read_with(cx, |buffer, _cx| buffer.anchor_range_outside(range.clone()));
@@ -770,6 +789,7 @@ impl EditSession {
             return Err("Cannot finalize edits on a write session".to_string());
         };
 
+        let edits: Vec<Edit> = edits.into_iter().map(normalize_edit_for_local_models).collect();
         for event in &parser.finalize_edits(&edits) {
             edit_pipeline.process_event(
                 event,
@@ -939,9 +959,8 @@ fn extract_match(
 
     match matches.len() {
         0 => Err(format!(
-            "Could not find matching text for edit at index {}. \
-                The old_text did not match any content in the file.{} \
-                Please read the file again to get the current content.",
+            "edit_file: old_text not found (hunk {}).{} \
+                Copy exact file bytes from read_file, strip line numbers, include unique surrounding lines.",
             edit_index, file_changed_since_last_read_message,
         )),
         1 => Ok(matches.into_iter().next().unwrap()),
@@ -959,6 +978,61 @@ fn extract_match(
                 edit_index, lines
             ))
         }
+    }
+}
+
+fn looks_like_read_file_line_prefix(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && bytes[i] == b' ' {
+        i += 1;
+    }
+    let digits_start = i;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    i > digits_start && i < bytes.len() && bytes[i] == b'\t'
+}
+
+fn strip_read_file_line_prefixes(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            if looks_like_read_file_line_prefix(line) {
+                let tab = line.find('\t').unwrap_or(0);
+                &line[tab + 1..]
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Normalize edit text copied from `read_file` (`cat -n` prefixes + CRLF).
+pub fn normalize_local_model_edit_text(text: &str) -> String {
+    let normalized = text.replace("\r\n", "\n");
+    let nonempty = normalized
+        .lines()
+        .filter(|line| !line.is_empty())
+        .count();
+    if nonempty == 0 {
+        return normalized;
+    }
+    let prefixed = normalized
+        .lines()
+        .filter(|line| !line.is_empty() && looks_like_read_file_line_prefix(line))
+        .count();
+    if prefixed * 2 >= nonempty {
+        strip_read_file_line_prefixes(&normalized)
+    } else {
+        normalized
+    }
+}
+
+fn normalize_edit_for_local_models(edit: Edit) -> Edit {
+    Edit {
+        old_text: normalize_local_model_edit_text(&edit.old_text),
+        new_text: normalize_local_model_edit_text(&edit.new_text),
     }
 }
 
@@ -1238,6 +1312,43 @@ fn resolve_path(
 
             new_file_path.ok_or_else(|| "Can't create file".to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod local_edit_normalize_tests {
+    use super::*;
+
+    #[test]
+    fn strips_cat_n_prefixes() {
+        let numbered = "    12\tfn main() {\n    13\t    let x = 1;\n    14\t}";
+        assert_eq!(
+            normalize_local_model_edit_text(numbered),
+            "fn main() {\n    let x = 1;\n}"
+        );
+    }
+
+    #[test]
+    fn leaves_unprefixed_text_alone() {
+        let plain = "fn main() {\n    let x = 1;\n}";
+        assert_eq!(normalize_local_model_edit_text(plain), plain);
+    }
+
+    #[test]
+    fn normalizes_crlf() {
+        assert_eq!(
+            normalize_local_model_edit_text("fn main() {\r\n    let x = 1;\r\n}"),
+            "fn main() {\n    let x = 1;\n}"
+        );
+    }
+
+    #[test]
+    fn preserves_tabs_inside_code() {
+        let numbered = "    1\tfn main() {\n    2\t\tlet x = 1;\n    3\t}";
+        assert_eq!(
+            normalize_local_model_edit_text(numbered),
+            "fn main() {\n\tlet x = 1;\n}"
+        );
     }
 }
 

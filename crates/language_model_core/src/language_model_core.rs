@@ -29,7 +29,7 @@ pub use crate::tool_call_normalization::{
     ExtractedToolCall, extract_tool_calls_from_text, normalize_tool_arguments,
     normalize_tool_arguments_lenient, repair_malformed_tool_use,
 };
-pub use crate::tool_schema::LanguageModelToolSchemaFormat;
+pub use crate::tool_schema::{LanguageModelToolSchemaFormat, minify_tool_schema_for_local};
 pub use crate::util::{fix_streamed_json, parse_prompt_too_long, parse_tool_arguments};
 pub use gpui_shared_string::SharedString;
 

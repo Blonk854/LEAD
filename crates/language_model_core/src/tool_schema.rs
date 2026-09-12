@@ -91,6 +91,53 @@ pub fn adapt_schema_to_format(
     Ok(())
 }
 
+/// Drop titles and shorten nested descriptions so local models spend
+/// fewer tokens on tool schemas.
+pub fn minify_tool_schema_for_local(schema: &mut Value) {
+    strip_key_recursive(schema, "title");
+    strip_key_recursive(schema, "$schema");
+    truncate_nested_descriptions(schema, 120, 0);
+}
+
+fn strip_key_recursive(value: &mut Value, key: &str) {
+    match value {
+        Value::Object(map) => {
+            map.remove(key);
+            for child in map.values_mut() {
+                strip_key_recursive(child, key);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_key_recursive(item, key);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn truncate_nested_descriptions(value: &mut Value, max_chars: usize, depth: usize) {
+    match value {
+        Value::Object(map) => {
+            if depth > 0
+                && let Some(Value::String(description)) = map.get_mut("description")
+                && description.len() > max_chars
+            {
+                description.truncate(max_chars);
+            }
+            for child in map.values_mut() {
+                truncate_nested_descriptions(child, max_chars, depth + 1);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                truncate_nested_descriptions(item, max_chars, depth);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn preprocess_json_schema(json: &mut Value) -> Result<()> {
     if let Value::Object(obj) = json
         && matches!(obj.get("type"), Some(Value::String(s)) if s == "object")
@@ -812,6 +859,33 @@ mod tests {
                 "additionalProperties": false
             })
         );
+    }
+
+    #[test]
+    fn test_minify_tool_schema_for_local_keeps_top_level_description() {
+        let mut json = json!({
+            "title": "EditFile",
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "description": "Apply sequential replacements.",
+            "type": "object",
+            "properties": {
+                "path": {
+                    "title": "Path",
+                    "description": "x".repeat(400),
+                    "type": "string"
+                }
+            }
+        });
+        minify_tool_schema_for_local(&mut json);
+        assert!(json.get("title").is_none());
+        assert!(json.get("$schema").is_none());
+        assert_eq!(
+            json["description"],
+            "Apply sequential replacements."
+        );
+        let nested = json["properties"]["path"]["description"].as_str().unwrap();
+        assert_eq!(nested.len(), 120);
+        assert!(json["properties"]["path"].get("title").is_none());
     }
 
     #[test]

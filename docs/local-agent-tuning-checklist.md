@@ -11,6 +11,8 @@ Bundled defaults in `assets/settings/default.json`:
 - `agent.default_model.provider` → `lmstudio`
 - `agent.default_model.model` → check LM Studio model id matches a loaded model
 - `agent.network_agent.enabled` → `false` unless using hybrid mode
+- `agent.full_access.enabled` → `false` unless you want Unleashed tools
+- `agent.prompt_style` → `auto` (compact local prompt; full prompt on the hybrid orchestrator)
 
 New threads use `default_profile` from agent settings.
 
@@ -29,10 +31,11 @@ than frontier models.
 
 ## 3. Profile choice
 
-- `local-agent` — default in LEAD; lean tool set for local workflows
+- `local-agent` — default in LEAD; lean coding tools plus journal and skills (no web/RAG)
 - `write` — more IDE tools (`find_references`, `go_to_definition`, …)
+- `hybrid` — Network Agent orchestrator + local workers
 
-Use `write` when debugging needs deeper code navigation.
+Use `write` when debugging needs deeper code navigation. Enable `fetch` / `research_web` / `rag_*` on the profile if you need them.
 
 ## 4. Tool permissions (trusted projects)
 

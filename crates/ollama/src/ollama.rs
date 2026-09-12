@@ -24,7 +24,7 @@ pub struct Model {
 }
 
 fn get_max_tokens(_name: &str) -> u64 {
-    const DEFAULT_TOKENS: u64 = 4096;
+    const DEFAULT_TOKENS: u64 = 32768;
     DEFAULT_TOKENS
 }
 
